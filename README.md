@@ -1,4 +1,5 @@
 # PostgreSQL MCP Server
+[![smithery badge](https://smithery.ai/badge/@HenkDz/postgresql-mcp-server)](https://smithery.ai/server/@HenkDz/postgresql-mcp-server)
 
 A Model Context Protocol (MCP) server that provides PostgreSQL database management capabilities. This server assists with analyzing existing PostgreSQL setups, providing implementation guidance, debugging database issues, managing schemas, migrating data, and monitoring database performance.
 
@@ -200,6 +201,15 @@ Real-time monitoring of PostgreSQL database:
 
 ## Installation
 
+### Installing via Smithery
+
+To install postgresql-mcp-server for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@HenkDz/postgresql-mcp-server):
+
+```bash
+npx -y @smithery/cli install @HenkDz/postgresql-mcp-server --client claude
+```
+
+### Manual Installation
 1. Clone the repository
 2. Install dependencies:
    ```bash
