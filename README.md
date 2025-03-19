@@ -70,7 +70,24 @@ Get detailed schema information for a database or specific table:
 }
 ```
 
-#### 5. Create Table (`create_table`)
+#### 5. Row-Level Security Policies (`get_rls_policies`)
+Retrieve Row-Level Security policies for a specific table or all tables in a schema:
+- Policy names and associated tables
+- Roles the policies apply to
+- Command types (SELECT, INSERT, UPDATE, DELETE, ALL)
+- USING and WITH CHECK expressions
+- Policy comments
+
+```typescript
+// Example usage
+{
+  "connectionString": "postgresql://user:password@localhost:5432/dbname",
+  "tableName": "users", // Optional: specific table to get policies for
+  "schema": "public" // Optional: defaults to public
+}
+```
+
+#### 6. Create Table (`create_table`)
 Create a new table with specified columns:
 - Define column names and types
 - Set nullable constraints
@@ -90,7 +107,7 @@ Create a new table with specified columns:
 }
 ```
 
-#### 6. Alter Table (`alter_table`)
+#### 7. Alter Table (`alter_table`)
 Modify existing tables:
 - Add new columns
 - Modify column types or constraints
@@ -111,7 +128,7 @@ Modify existing tables:
 
 ### Data Migration
 
-#### 7. Export Table Data (`export_table_data`)
+#### 8. Export Table Data (`export_table_data`)
 Export table data to JSON or CSV format:
 - Filter data with WHERE clause
 - Limit number of rows
@@ -129,7 +146,7 @@ Export table data to JSON or CSV format:
 }
 ```
 
-#### 8. Import Table Data (`import_table_data`)
+#### 9. Import Table Data (`import_table_data`)
 Import data from JSON or CSV files:
 - Optionally truncate table before import
 - Support for different formats
@@ -147,7 +164,7 @@ Import data from JSON or CSV files:
 }
 ```
 
-#### 9. Copy Between Databases (`copy_between_databases`)
+#### 10. Copy Between Databases (`copy_between_databases`)
 Copy data between two PostgreSQL databases:
 - Filter data with WHERE clause
 - Optionally truncate target table
@@ -163,9 +180,65 @@ Copy data between two PostgreSQL databases:
 }
 ```
 
+### Database Comments
+
+#### 11. Set Database Comment (`set_database_comment`)
+Set a comment on a database object:
+- Support for multiple object types (tables, columns, functions, policies, triggers, constraints, indexes, sequences)
+- Schema specification
+- Parent object specification for columns, constraints, policies, and triggers
+- Parameter specification for functions
+
+```typescript
+// Example usage
+{
+  "connectionString": "postgresql://user:password@localhost:5432/dbname",
+  "objectType": "table", // Required: "table" | "column" | "function" | "policy" | "trigger" | "constraint" | "index" | "sequence"
+  "objectName": "users", // Required: name of the object to comment on
+  "comment": "Stores user account information", // Required: the comment text
+  "schema": "public", // Optional: defaults to public
+  "parentObject": "users", // Optional: required for column, constraint, policy, trigger
+  "parameters": "integer, text" // Optional: for functions only
+}
+```
+
+#### 12. Get Database Comment (`get_database_comment`)
+Retrieve a comment from a database object:
+- Support for the same object types as set_database_comment
+- Returns the comment text and object details
+
+```typescript
+// Example usage
+{
+  "connectionString": "postgresql://user:password@localhost:5432/dbname",
+  "objectType": "table", // Required: "table" | "column" | "function" | "policy" | "trigger" | "constraint" | "index" | "sequence"
+  "objectName": "users", // Required: name of the object to get comment from
+  "schema": "public", // Optional: defaults to public
+  "parentObject": "users", // Optional: required for column, constraint, policy, trigger
+  "parameters": "integer, text" // Optional: for functions only
+}
+```
+
+#### 13. Remove Database Comment (`remove_database_comment`)
+Remove a comment from a database object:
+- Support for the same object types as set_database_comment
+- Same parameter structure as get_database_comment
+
+```typescript
+// Example usage
+{
+  "connectionString": "postgresql://user:password@localhost:5432/dbname",
+  "objectType": "table", // Required: "table" | "column" | "function" | "policy" | "trigger" | "constraint" | "index" | "sequence"
+  "objectName": "users", // Required: name of the object to remove comment from
+  "schema": "public", // Optional: defaults to public
+  "parentObject": "users", // Optional: required for column, constraint, policy, trigger
+  "parameters": "integer, text" // Optional: for functions only
+}
+```
+
 ### Monitoring
 
-#### 10. Monitor Database (`monitor_database`)
+#### 14. Monitor Database (`monitor_database`)
 Real-time monitoring of PostgreSQL database:
 - Database metrics (connections, cache hit ratio, etc.)
 - Table metrics (size, row counts, dead tuples)
