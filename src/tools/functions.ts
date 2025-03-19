@@ -391,26 +391,30 @@ export async function getRLSPolicies(
     await db.connect(connectionString);
     
     let query = `
-      SELECT 
-        schemaname,
-        tablename,
-        policyname,
-        roles,
-        cmd,
-        qual as "using",
-        with_check as "check"
-      FROM pg_policies
-      WHERE schemaname = $1
+     SELECT 
+        p.schemaname,
+        p.tablename,
+        p.policyname,
+        p.roles,
+        p.cmd,
+        p.qual as "using",
+        p.with_check as "check",
+        d.description as "comment"
+      FROM pg_policies p
+      LEFT JOIN pg_class c ON c.relname = p.tablename AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = p.schemaname)
+      LEFT JOIN pg_policy pol ON pol.polname = p.policyname AND pol.polrelid = c.oid
+      LEFT JOIN pg_description d ON d.objoid = pol.oid AND d.classoid = (SELECT oid FROM pg_class WHERE relname = 'pg_policy')
+      WHERE p.schemaname = $1
     `;
     
     const params = [schema];
     
     if (tableName) {
-      query += ' AND tablename = $2';
+      query += ' AND p.tablename = $2';
       params.push(tableName);
     }
     
-    query += ' ORDER BY tablename, policyname';
+    query += ' ORDER BY p.tablename, p.policyname';
     
     const policies = await db.query(query, params);
     

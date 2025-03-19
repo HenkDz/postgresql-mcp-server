@@ -25,6 +25,11 @@ import {
   getRLSPolicies 
 } from './tools/functions.js';
 import {
+  setDatabaseComment,
+  removeDatabaseComment,
+  getDatabaseComment
+} from './tools/comment.js';
+import {
   getTriggers,
   createTrigger,
   dropTrigger,
@@ -789,6 +794,117 @@ const TOOL_DEFINITIONS = [
       },
       required: ['connectionString', 'triggerName', 'tableName', 'enable']
     }
+  },
+  
+  // Comment management tools
+  {
+    name: 'set_database_comment',
+    description: 'Set a comment on a database object',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        connectionString: {
+          type: 'string',
+          description: 'PostgreSQL connection string'
+        },
+        objectType: {
+          type: 'string',
+          enum: ['table', 'column', 'function', 'policy', 'trigger', 'constraint', 'index', 'sequence'],
+          description: 'Type of database object (table, column, function, policy, etc.)'
+        },
+        objectName: {
+          type: 'string',
+          description: 'Name of the object to comment on'
+        },
+        comment: {
+          type: 'string',
+          description: 'The comment text'
+        },
+        schema: {
+          type: 'string',
+          description: 'Schema name (defaults to public)'
+        },
+        parentObject: {
+          type: 'string',
+          description: 'For columns, constraints, policies, triggers'
+        },
+        parameters: {
+          type: 'string',
+          description: 'For functions'
+        }
+      },
+      required: ['connectionString', 'objectType', 'objectName', 'comment']
+    }
+  },
+  {
+    name: 'remove_database_comment',
+    description: 'Remove a comment from a database object',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        connectionString: {
+          type: 'string',
+          description: 'PostgreSQL connection string'
+        },
+        objectType: {
+          type: 'string',
+          enum: ['table', 'column', 'function', 'policy', 'trigger', 'constraint', 'index', 'sequence'],
+          description: 'Type of database object (table, column, function, policy, etc.)'
+        },
+        objectName: {
+          type: 'string',
+          description: 'Name of the object to remove comment from'
+        },
+        schema: {
+          type: 'string',
+          description: 'Schema name (defaults to public)'
+        },
+        parentObject: {
+          type: 'string',
+          description: 'For columns, constraints, policies, triggers'
+        },
+        parameters: {
+          type: 'string',
+          description: 'For functions'
+        }
+      },
+      required: ['connectionString', 'objectType', 'objectName']
+    }
+  },
+  {
+    name: 'get_database_comment',
+    description: 'Get a comment from a database object',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        connectionString: {
+          type: 'string',
+          description: 'PostgreSQL connection string'
+        },
+        objectType: {
+          type: 'string',
+          enum: ['table', 'column', 'function', 'policy', 'trigger', 'constraint', 'index', 'sequence'],
+          description: 'Type of database object (table, column, function, policy, etc.)'
+        },
+        objectName: {
+          type: 'string',
+          description: 'Name of the object to get comment from'
+        },
+        schema: {
+          type: 'string',
+          description: 'Schema name (defaults to public)'
+        },
+        parentObject: {
+          type: 'string',
+          description: 'For columns, constraints, policies, triggers'
+        },
+        parameters: {
+          type: 'string',
+          description: 'For functions'
+        }
+      },
+      required: ['connectionString', 'objectType', 'objectName']
+    }
   }
 ];
 
@@ -1349,6 +1465,96 @@ class PostgreSQLServer {
               enable,
               {
                 schema
+              }
+            );
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(result, null, 2)
+                }
+              ]
+            };
+          }
+          
+          // Comment management handlers
+          case 'set_database_comment': {
+            const { connectionString, objectType, objectName, comment, schema, parentObject, parameters } = request.params.arguments as {
+              connectionString: string;
+              objectType: 'table' | 'column' | 'function' | 'policy' | 'trigger' | 'constraint' | 'index' | 'sequence';
+              objectName: string;
+              comment: string;
+              schema?: string;
+              parentObject?: string;
+              parameters?: string;
+            };
+            const result = await setDatabaseComment(
+              connectionString,
+              objectType,
+              objectName,
+              comment,
+              {
+                schema,
+                parentObject,
+                parameters
+              }
+            );
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(result, null, 2)
+                }
+              ]
+            };
+          }
+          
+          case 'remove_database_comment': {
+            const { connectionString, objectType, objectName, schema, parentObject, parameters } = request.params.arguments as {
+              connectionString: string;
+              objectType: 'table' | 'column' | 'function' | 'policy' | 'trigger' | 'constraint' | 'index' | 'sequence';
+              objectName: string;
+              schema?: string;
+              parentObject?: string;
+              parameters?: string;
+            };
+            const result = await removeDatabaseComment(
+              connectionString,
+              objectType,
+              objectName,
+              {
+                schema,
+                parentObject,
+                parameters
+              }
+            );
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(result, null, 2)
+                }
+              ]
+            };
+          }
+          
+          case 'get_database_comment': {
+            const { connectionString, objectType, objectName, schema, parentObject, parameters } = request.params.arguments as {
+              connectionString: string;
+              objectType: 'table' | 'column' | 'function' | 'policy' | 'trigger' | 'constraint' | 'index' | 'sequence';
+              objectName: string;
+              schema?: string;
+              parentObject?: string;
+              parameters?: string;
+            };
+            const result = await getDatabaseComment(
+              connectionString,
+              objectType,
+              objectName,
+              {
+                schema,
+                parentObject,
+                parameters
               }
             );
             return {
