@@ -1,6 +1,6 @@
 {
   "name": "@henkey/postgres-mcp-server",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "A Model Context Protocol (MCP) server that provides comprehensive PostgreSQL database management capabilities for AI assistants",
   "main": "build/index.js",
   "types": "build/index.d.ts",
@@ -46,12 +46,12 @@
   "license": "AGPL-3.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/henkey/postgres-mcp-server.git"
+    "url": "git+https://github.com/HenkDz/postgresql-mcp-server.git"
   },
   "bugs": {
-    "url": "https://github.com/henkey/postgres-mcp-server/issues"
+    "url": "https://github.com/HenkDz/postgresql-mcp-server/issues"
   },
-  "homepage": "https://github.com/henkey/postgres-mcp-server#readme",
+  "homepage": "https://github.com/HenkDz/postgresql-mcp-server#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "latest",
     "commander": "^12.1.0",
