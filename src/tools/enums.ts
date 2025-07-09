@@ -8,11 +8,6 @@ import type { PostgresTool, GetConnectionStringFn, ToolOutput } from '../types/t
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 // Define return type structure similar to schema.ts
-interface EnumResult {
-  success: boolean;
-  message: string;
-  details: unknown;
-}
 
 interface EnumInfo {
   enum_schema: string;

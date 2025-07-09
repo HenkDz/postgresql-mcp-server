@@ -7,7 +7,7 @@ A Model Context Protocol (MCP) server that provides comprehensive PostgreSQL dat
 
 ## Quick Start
 
-[![Install MCP Server](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/install-mcp?name=postgresql-mcp&config=JTdCJTIyY29tbWFuZCUyMiUzQSUyMm5weCUyMCU0MGhlbmtleSUyRnBvc3RncmVzLW1jcC1zZXJ2ZXIlMjAtLWNvbm5lY3Rpb24tc3RyaW5nJTIwcG9zdGdyZXNxbCUzQSUyRiUyRnVzZXIlM0FwYXNzd29yZCU0MGhvc3QlM0Fwb3J0JTJGZGF0YWJhc2UlMjIlN0Q%3D)
+[![Install MCP Server](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/install-mcp?name=postgresql-mcp&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBoZW5rZXkvcG9zdGdyZXMtbWNwLXNlcnZlciIsIi0tY29ubmVjdGlvbi1zdHJpbmciLCJwb3N0Z3Jlc3FsOi8vdXNlcjpwYXNzd29yZEBob3N0OnBvcnQvZGF0YWJhc2UiXX0=)
 
 ### Option 1: npm (Recommended)
 ```bash

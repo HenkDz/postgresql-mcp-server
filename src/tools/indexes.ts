@@ -2,7 +2,6 @@ import { DatabaseConnection } from '../utils/connection.js';
 import { z } from 'zod';
 import type { PostgresTool, GetConnectionStringFn, ToolOutput } from '../types/tool.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
-import type { PoolClient } from 'pg';
 
 interface IndexInfo {
   schemaname: string;
