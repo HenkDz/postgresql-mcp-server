@@ -2,6 +2,10 @@
 
 A Model Context Protocol (MCP) server that provides PostgreSQL database management capabilities. This server assists with analyzing existing PostgreSQL setups, providing implementation guidance, and debugging database issues.
 
+<a href="https://glama.ai/mcp/servers/@HenkDz/postgresql-mcp-server">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@HenkDz/postgresql-mcp-server/badge" alt="PostgreSQL Server MCP server" />
+</a>
+
 ## Features
 
 ### 1. Database Analysis (`analyze_database`)
