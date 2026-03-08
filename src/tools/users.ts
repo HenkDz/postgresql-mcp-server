@@ -90,7 +90,7 @@ async function executeCreateUser(
 
 export const createUserTool: PostgresTool = {
   name: 'pg_create_user',
-  description: 'Create a new PostgreSQL user/role',
+  description: 'Create a new PostgreSQL user/role. Use when the user wants to create a new resource that does not yet exist. Unlike pg_create_foreign_key, pg_create_constraint, this tool specifically handles pg create user.',
   inputSchema: CreateUserInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = CreateUserInputSchema.safeParse(params);
@@ -147,7 +147,7 @@ async function executeDropUser(
 
 export const dropUserTool: PostgresTool = {
   name: 'pg_drop_user',
-  description: 'Drop a PostgreSQL user/role',
+  description: 'Drop a PostgreSQL user/role. Use when the user wants to pg drop user. Unlike pg_drop_foreign_key, pg_drop_constraint, this tool specifically handles pg drop user.',
   inputSchema: DropUserInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = DropUserInputSchema.safeParse(params);
@@ -235,7 +235,7 @@ async function executeAlterUser(
 
 export const alterUserTool: PostgresTool = {
   name: 'pg_alter_user',
-  description: 'Alter an existing PostgreSQL user/role',
+  description: 'Alter an existing PostgreSQL user/role. Use when the user wants to pg alter user. Unlike pg_alter_table, pg_create_user, this tool specifically handles pg alter user.',
   inputSchema: AlterUserInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = AlterUserInputSchema.safeParse(params);
@@ -317,7 +317,7 @@ async function executeGrantPermissions(
 
 export const grantPermissionsTool: PostgresTool = {
   name: 'pg_grant_permissions',
-  description: 'Grant permissions to a user/role',
+  description: 'Grant permissions to a user/role. Use when the user wants to pg grant permissions. Unlike pg_revoke_permissions, pg_get_user_permissions, this tool specifically handles pg grant permissions.',
   inputSchema: GrantPermissionsInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = GrantPermissionsInputSchema.safeParse(params);
@@ -399,7 +399,7 @@ async function executeRevokePermissions(
 
 export const revokePermissionsTool: PostgresTool = {
   name: 'pg_revoke_permissions',
-  description: 'Revoke permissions from a user/role',
+  description: 'Revoke permissions from a user/role. Use when the user wants to pg revoke permissions. Unlike pg_grant_permissions, pg_get_user_permissions, this tool specifically handles pg revoke permissions.',
   inputSchema: RevokePermissionsInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = RevokePermissionsInputSchema.safeParse(params);
@@ -493,7 +493,7 @@ async function executeGetUserPermissions(
 
 export const getUserPermissionsTool: PostgresTool = {
   name: 'pg_get_user_permissions',
-  description: 'Get permissions for a user/role or all users',
+  description: 'Get permissions for a user/role or all users. Use when the user needs to retrieve a specific resource by identifier. Unlike pg_get_constraints, pg_get_enums, this tool specifically handles pg get user permissions.',
   inputSchema: GetUserPermissionsInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = GetUserPermissionsInputSchema.safeParse(params);
@@ -562,7 +562,7 @@ async function executeListUsers(
 
 export const listUsersTool: PostgresTool = {
   name: 'pg_list_users',
-  description: 'List all users/roles in the database',
+  description: 'List all users/roles in the database. Use when the user wants to see all available items in a collection or directory. Unlike pg_manage_users, this tool specifically handles pg list users.',
   inputSchema: ListUsersInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = ListUsersInputSchema.safeParse(params);
@@ -585,7 +585,7 @@ export const listUsersTool: PostgresTool = {
 // Consolidated User Management Tool
 export const manageUsersTool: PostgresTool = {
   name: 'pg_manage_users',
-  description: 'Manage PostgreSQL users and permissions - create, drop, alter users, grant/revoke permissions. Examples: operation="create" with username="testuser", operation="grant" with username, permissions, target, targetType',
+  description: 'Manage PostgreSQL users and permissions - create, drop, alter users, grant/revoke permissions. Examples: operation="create" with username="testuser", operation="grant" with username, permissions, target, targetType. Use when the user wants to pg manage users. Unlike pg_manage_comments, pg_manage_constraints, this tool specifically handles pg manage users.',
   inputSchema: z.object({
     connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
     operation: z.enum(['create', 'drop', 'alter', 'grant', 'revoke', 'get_permissions', 'list']).describe('Operation: create (new user), drop (remove user), alter (modify user), grant (permissions), revoke (permissions), get_permissions (view permissions), list (all users)'),

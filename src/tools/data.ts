@@ -87,7 +87,7 @@ async function executeQuery(
 
 export const executeQueryTool: PostgresTool = {
   name: 'pg_execute_query',
-  description: 'Execute SELECT queries and data retrieval operations - operation="select/count/exists" with query and optional parameters. Examples: operation="select", query="SELECT * FROM users WHERE created_at > $1", parameters=["2024-01-01"]',
+  description: 'Execute SELECT queries and data retrieval operations - operation="select/count/exists" with query and optional parameters. Examples: operation="select", query="SELECT * FROM users WHERE created_at > $1", parameters=["2024-01-01"]. Use when the user wants to extract specific data using a structured query. Unlike pg_execute_mutation, pg_execute_sql, this tool specifically handles pg execute query.',
   inputSchema: ExecuteQueryInputSchema,
   execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
     const { 
@@ -297,7 +297,7 @@ async function executeMutation(
 
 export const executeMutationTool: PostgresTool = {
   name: 'pg_execute_mutation',
-  description: 'Execute data modification operations (INSERT/UPDATE/DELETE/UPSERT) - operation="insert/update/delete/upsert" with table and data. Examples: operation="insert", table="users", data={"name":"John","email":"john@example.com"}',
+  description: 'Execute data modification operations (INSERT/UPDATE/DELETE/UPSERT) - operation="insert/update/delete/upsert" with table and data. Examples: operation="insert", table="users", data={"name":"John","email":"john@example.com"}. Use when the user wants to pg execute mutation. Unlike pg_execute_query, pg_execute_sql, this tool specifically handles pg execute mutation.',
   inputSchema: ExecuteMutationInputSchema,
   execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
     const { 
@@ -428,7 +428,7 @@ async function executeSql(
 
 export const executeSqlTool: PostgresTool = {
   name: 'pg_execute_sql',
-  description: 'Execute arbitrary SQL statements - sql="ANY_VALID_SQL" with optional parameters and transaction support. Examples: sql="CREATE INDEX ...", sql="WITH complex_cte AS (...) SELECT ...", transactional=true',
+  description: 'Execute arbitrary SQL statements - sql="ANY_VALID_SQL" with optional parameters and transaction support. Examples: sql="CREATE INDEX ...", sql="WITH complex_cte AS (...) SELECT ...", transactional=true. Use when the user wants to pg execute sql. Unlike pg_execute_query, pg_execute_mutation, this tool specifically handles pg execute sql.',
   inputSchema: ExecuteSqlInputSchema,
   execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
     const { 

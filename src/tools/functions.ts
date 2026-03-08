@@ -270,7 +270,7 @@ async function _disableRLS(
 }
 
 /**
- * Create a Row-Level Security policy
+ * Create a Row-Level Security policy. Use when the user wants to create a new resource that does not yet exist. Unlike pg_create_foreign_key, pg_create_constraint, this tool specifically handles pg create rls policy.
  */
 async function _createRLSPolicy(
   connectionString: string,
@@ -338,7 +338,7 @@ async function _createRLSPolicy(
 }
 
 /**
- * Drop a Row-Level Security policy
+ * Drop a Row-Level Security policy. Use when the user wants to pg drop rls policy. Unlike pg_drop_foreign_key, pg_drop_constraint, this tool specifically handles pg drop rls policy.
  */
 async function _dropRLSPolicy(
   connectionString: string,
@@ -380,7 +380,7 @@ async function _dropRLSPolicy(
 }
 
 /**
- * Edit an existing Row-Level Security policy
+ * Edit an existing Row-Level Security policy. Use when the user wants to modify part of an existing file without rewriting it entirely. Unlike pg_enable_rls, pg_disable_rls, this tool specifically handles pg edit rls policy.
  */
 async function _editRLSPolicy(
   connectionString: string,
@@ -467,7 +467,7 @@ async function _editRLSPolicy(
 }
 
 /**
- * Get Row-Level Security policies for a table
+ * Get Row-Level Security policies. Use when the user needs to retrieve a specific resource by identifier. Unlike pg_get_constraints, pg_get_enums, this tool specifically handles pg get rls policies. for a table
  */
 async function _getRLSPolicies(
   connectionString: string,
@@ -525,7 +525,7 @@ async function _getRLSPolicies(
 
 export const getFunctionsTool: PostgresTool = {
   name: 'pg_get_functions',
-  description: 'Get information about PostgreSQL functions',
+  description: 'Get information about PostgreSQL functions. Use when the user needs to retrieve a specific resource by identifier. Unlike pg_get_constraints, pg_get_enums, this tool specifically handles pg get functions.',
   inputSchema: z.object({
     connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
     functionName: z.string().optional().describe('Optional function name to filter by'),
@@ -549,7 +549,7 @@ export const getFunctionsTool: PostgresTool = {
 
 export const createFunctionTool: PostgresTool = {
   name: 'pg_create_function',
-  description: 'Create or replace a PostgreSQL function',
+  description: 'Create or replace a PostgreSQL function. Use when the user wants to create a new resource that does not yet exist. Unlike pg_create_foreign_key, pg_create_constraint, this tool specifically handles pg create function.',
   inputSchema: z.object({
     connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
     functionName: z.string().describe('Name of the function to create'),
@@ -598,7 +598,7 @@ export const createFunctionTool: PostgresTool = {
 
 export const dropFunctionTool: PostgresTool = {
   name: 'pg_drop_function',
-  description: 'Drop a PostgreSQL function',
+  description: 'Drop a PostgreSQL function. Use when the user wants to pg drop function. Unlike pg_drop_foreign_key, pg_drop_constraint, this tool specifically handles pg drop function.',
   inputSchema: z.object({
     connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
     functionName: z.string().describe('Name of the function to drop'),
@@ -635,7 +635,7 @@ export const dropFunctionTool: PostgresTool = {
 
 export const enableRLSTool: PostgresTool = {
   name: 'pg_enable_rls',
-  description: 'Enable Row-Level Security on a table',
+  description: 'Enable Row-Level Security on a table. Use when the user wants to pg enable rls. Unlike pg_disable_rls, pg_create_rls_policy, this tool specifically handles pg enable rls.',
   inputSchema: z.object({
     connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
     tableName: z.string().describe('Name of the table to enable RLS on'),
@@ -655,7 +655,7 @@ export const enableRLSTool: PostgresTool = {
 
 export const disableRLSTool: PostgresTool = {
   name: 'pg_disable_rls',
-  description: 'Disable Row-Level Security on a table',
+  description: 'Disable Row-Level Security on a table. Use when the user wants to pg disable rls. Unlike pg_enable_rls, pg_create_rls_policy, this tool specifically handles pg disable rls.',
   inputSchema: z.object({
     connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
     tableName: z.string().describe('Name of the table to disable RLS on'),
@@ -768,7 +768,7 @@ export const getRLSPoliciesTool: PostgresTool = {
 // Consolidated Functions Management Tool
 export const manageFunctionsTool: PostgresTool = {
   name: 'pg_manage_functions',
-  description: 'Manage PostgreSQL functions - get, create, or drop functions with a single tool. Examples: operation="get" to list functions, operation="create" with functionName="test_func", parameters="" (empty for no params), returnType="TEXT", functionBody="SELECT \'Hello\'"',
+  description: 'Manage PostgreSQL functions - get, create, or drop functions with a single tool. Examples: operation="get" to list functions, operation="create" with functionName="test_func", parameters="" (empty for no params), returnType="TEXT", functionBody="SELECT \. Use when the user wants to pg manage functions. Unlike pg_manage_comments, pg_manage_constraints, this tool specifically handles pg manage functions.'Hello\'"',
   inputSchema: z.object({
     connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
     operation: z.enum(['get', 'create', 'drop']).describe('Operation to perform: get (list/info), create (new function), or drop (remove function)'),
@@ -910,7 +910,7 @@ export const manageFunctionsTool: PostgresTool = {
 // Consolidated Row-Level Security Management Tool
 export const manageRLSTool: PostgresTool = {
   name: 'pg_manage_rls',
-  description: 'Manage PostgreSQL Row-Level Security - enable/disable RLS and manage policies. Examples: operation="enable" with tableName="users", operation="create_policy" with tableName, policyName, using, check',
+  description: 'Manage PostgreSQL Row-Level Security - enable/disable RLS and manage policies. Examples: operation="enable" with tableName="users", operation="create_policy" with tableName, policyName, using, check. Use when the user wants to pg manage rls. Unlike pg_manage_comments, pg_manage_constraints, this tool specifically handles pg manage rls.',
   inputSchema: z.object({
     connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
     operation: z.enum(['enable', 'disable', 'create_policy', 'edit_policy', 'drop_policy', 'get_policies']).describe('Operation: enable/disable RLS, create_policy, edit_policy, drop_policy, get_policies'),

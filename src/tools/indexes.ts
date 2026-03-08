@@ -102,7 +102,7 @@ async function executeGetIndexes(
 
 export const getIndexesTool: PostgresTool = {
   name: 'pg_get_indexes',
-  description: 'List indexes with size and usage statistics',
+  description: 'List indexes with size and usage statistics. Use when the user needs to retrieve a specific resource by identifier. Unlike pg_get_constraints, pg_get_enums, this tool specifically handles pg get indexes.',
   inputSchema: GetIndexesInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = GetIndexesInputSchema.safeParse(params);
@@ -170,7 +170,7 @@ async function executeCreateIndex(
 
 export const createIndexTool: PostgresTool = {
   name: 'pg_create_index',
-  description: 'Create a new index on a table',
+  description: 'Create a new index on a table. Use when the user wants to create a new resource that does not yet exist. Unlike pg_create_foreign_key, pg_create_constraint, this tool specifically handles pg create index.',
   inputSchema: CreateIndexInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = CreateIndexInputSchema.safeParse(params);
@@ -228,7 +228,7 @@ async function executeDropIndex(
 
 export const dropIndexTool: PostgresTool = {
   name: 'pg_drop_index',
-  description: 'Drop an existing index',
+  description: 'Drop an existing index. Use when the user wants to pg drop index. Unlike pg_drop_foreign_key, pg_drop_constraint, this tool specifically handles pg drop index.',
   inputSchema: DropIndexInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = DropIndexInputSchema.safeParse(params);
@@ -300,7 +300,7 @@ async function executeReindex(
 
 export const reindexTool: PostgresTool = {
   name: 'pg_reindex',
-  description: 'Rebuild indexes to improve performance and reclaim space',
+  description: 'Rebuild indexes to improve performance and reclaim space. Use when the user wants to pg reindex.',
   inputSchema: ReindexInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = ReindexInputSchema.safeParse(params);
@@ -457,7 +457,7 @@ async function formatBytes(db: DatabaseConnection, bytes: number): Promise<strin
 
 export const analyzeIndexUsageTool: PostgresTool = {
   name: 'pg_analyze_index_usage',
-  description: 'Find unused, duplicate, and low-usage indexes to optimize database performance',
+  description: 'Find unused, duplicate, and low-usage indexes to optimize database performance. Use when the user wants to pg analyze index usage. Unlike pg_analyze_database, pg_create_index, this tool specifically handles pg analyze index usage.',
   inputSchema: AnalyzeIndexUsageInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = AnalyzeIndexUsageInputSchema.safeParse(params);
@@ -480,7 +480,7 @@ export const analyzeIndexUsageTool: PostgresTool = {
 // Consolidated Index Management Tool
 export const manageIndexesTool: PostgresTool = {
   name: 'pg_manage_indexes',
-  description: 'Manage PostgreSQL indexes - get, create, drop, reindex, and analyze usage with a single tool. Examples: operation="get" to list indexes, operation="create" with indexName, tableName, columns, operation="analyze_usage" for performance analysis',
+  description: 'Manage PostgreSQL indexes - get, create, drop, reindex, and analyze usage with a single tool. Examples: operation="get" to list indexes, operation="create" with indexName, tableName, columns, operation="analyze_usage" for performance analysis. Use when the user wants to pg manage indexes. Unlike pg_manage_comments, pg_manage_constraints, this tool specifically handles pg manage indexes.',
   inputSchema: z.object({
     connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
     operation: z.enum(['get', 'create', 'drop', 'reindex', 'analyze_usage']).describe('Operation: get (list indexes), create (new index), drop (remove index), reindex (rebuild), analyze_usage (find unused/duplicate)'),

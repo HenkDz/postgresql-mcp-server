@@ -90,7 +90,7 @@ async function executeGetConstraints(
 
 export const getConstraintsTool: PostgresTool = {
   name: 'pg_get_constraints',
-  description: 'List all constraints (primary keys, foreign keys, unique, check)',
+  description: 'List all constraints (primary keys, foreign keys, unique, check). Use when the user needs to retrieve a specific resource by identifier. Unlike pg_manage_constraints, pg_get_enums, this tool specifically handles pg get constraints.',
   inputSchema: GetConstraintsInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = GetConstraintsInputSchema.safeParse(params);
@@ -184,7 +184,7 @@ async function executeCreateForeignKey(
 
 export const createForeignKeyTool: PostgresTool = {
   name: 'pg_create_foreign_key',
-  description: 'Create a foreign key constraint',
+  description: 'Create a foreign key constraint. Use when the user wants to create a new resource that does not yet exist. Unlike pg_drop_foreign_key, pg_create_constraint, this tool specifically handles pg create foreign key.',
   inputSchema: CreateForeignKeyInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = CreateForeignKeyInputSchema.safeParse(params);
@@ -241,7 +241,7 @@ async function executeDropForeignKey(
 
 export const dropForeignKeyTool: PostgresTool = {
   name: 'pg_drop_foreign_key',
-  description: 'Drop a foreign key constraint',
+  description: 'Drop a foreign key constraint. Use when the user wants to pg drop foreign key. Unlike pg_create_foreign_key, pg_drop_constraint, this tool specifically handles pg drop foreign key.',
   inputSchema: DropForeignKeyInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = DropForeignKeyInputSchema.safeParse(params);
@@ -337,7 +337,7 @@ async function executeCreateConstraint(
 
 export const createConstraintTool: PostgresTool = {
   name: 'pg_create_constraint',
-  description: 'Create a constraint (unique, check, or primary key)',
+  description: 'Create a constraint (unique, check, or primary key). Use when the user wants to create a new resource that does not yet exist. Unlike pg_create_foreign_key, pg_drop_constraint, this tool specifically handles pg create constraint.',
   inputSchema: CreateConstraintInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = CreateConstraintInputSchema.safeParse(params);
@@ -394,7 +394,7 @@ async function executeDropConstraint(
 
 export const dropConstraintTool: PostgresTool = {
   name: 'pg_drop_constraint',
-  description: 'Drop a constraint',
+  description: 'Drop a constraint. Use when the user wants to pg drop constraint. Unlike pg_drop_foreign_key, pg_create_constraint, this tool specifically handles pg drop constraint.',
   inputSchema: DropConstraintInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = DropConstraintInputSchema.safeParse(params);
@@ -414,7 +414,7 @@ export const dropConstraintTool: PostgresTool = {
 // Consolidated Constraint Management Tool
 export const manageConstraintsTool: PostgresTool = {
   name: 'pg_manage_constraints',
-  description: 'Manage PostgreSQL constraints - get, create foreign keys, drop foreign keys, create constraints, drop constraints. Examples: operation="get" to list constraints, operation="create_fk" with constraintName, tableName, columnNames, referencedTable, referencedColumns',
+  description: 'Manage PostgreSQL constraints - get, create foreign keys, drop foreign keys, create constraints, drop constraints. Examples: operation="get" to list constraints, operation="create_fk" with constraintName, tableName, columnNames, referencedTable, referencedColumns. Use when the user wants to pg manage constraints. Unlike pg_manage_comments, pg_get_constraints, this tool specifically handles pg manage constraints.',
   inputSchema: z.object({
     connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
     operation: z.enum(['get', 'create_fk', 'drop_fk', 'create', 'drop']).describe('Operation: get (list constraints), create_fk (foreign key), drop_fk (drop foreign key), create (constraint), drop (constraint)'),

@@ -121,7 +121,7 @@ async function executeExplainQuery(
 
 export const explainQueryTool: PostgresTool = {
   name: 'pg_explain_query',
-  description: 'EXPLAIN/EXPLAIN ANALYZE for queries to understand execution plans',
+  description: 'EXPLAIN/EXPLAIN ANALYZE for queries to understand execution plans. Use when the user wants to extract specific data using a structured query. Unlike pg_execute_query, pg_get_query_stats, this tool specifically handles pg explain query.',
   inputSchema: ExplainQueryInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = ExplainQueryInputSchema.safeParse(params);
@@ -207,7 +207,7 @@ async function executeGetSlowQueries(
 
 export const getSlowQueriesTool: PostgresTool = {
   name: 'pg_get_slow_queries',
-  description: 'Find slow running queries using pg_stat_statements',
+  description: 'Find slow running queries using pg_stat_statements. Use when the user needs to retrieve a specific resource by identifier. Unlike pg_get_constraints, pg_get_enums, this tool specifically handles pg get slow queries.',
   inputSchema: GetSlowQueriesInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = GetSlowQueriesInputSchema.safeParse(params);
@@ -309,7 +309,7 @@ async function executeGetQueryStats(
 
 export const getQueryStatsTool: PostgresTool = {
   name: 'pg_get_query_stats',
-  description: 'Query statistics from pg_stat_statements with cache hit ratios',
+  description: 'Query statistics from pg_stat_statements with cache hit ratios. Use when the user needs to retrieve a specific resource by identifier. Unlike pg_get_constraints, pg_execute_query, this tool specifically handles pg get query stats.',
   inputSchema: GetQueryStatsInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = GetQueryStatsInputSchema.safeParse(params);
@@ -362,7 +362,7 @@ async function executeResetQueryStats(
 
 export const resetQueryStatsTool: PostgresTool = {
   name: 'pg_reset_query_stats',
-  description: 'Reset pg_stat_statements statistics (all or specific query)',
+  description: 'Reset pg_stat_statements statistics (all or specific query). Use when the user wants to extract specific data using a structured query. Unlike pg_execute_query, pg_explain_query, this tool specifically handles pg reset query stats.',
   inputSchema: ResetQueryStatsInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = ResetQueryStatsInputSchema.safeParse(params);

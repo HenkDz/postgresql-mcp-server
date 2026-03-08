@@ -271,7 +271,7 @@ async function executeMonitorDatabase(
 
 export const monitorDatabaseTool: PostgresTool = {
   name: 'pg_monitor_database',
-  description: 'Get real-time monitoring information for a PostgreSQL database',
+  description: 'Get real-time monitoring information for a PostgreSQL database. Use when the user wants to pg monitor database. Unlike pg_analyze_database, pg_debug_database, this tool specifically handles pg monitor database.',
   inputSchema: MonitorDatabaseInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = MonitorDatabaseInputSchema.safeParse(params);

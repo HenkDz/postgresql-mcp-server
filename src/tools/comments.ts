@@ -492,7 +492,7 @@ async function executeBulkGetComments(
 // Consolidated Comments Management Tool
 export const manageCommentsTool: PostgresTool = {
   name: 'pg_manage_comments',
-  description: 'Manage PostgreSQL object comments - get, set, remove comments on tables, columns, functions, and other database objects. Examples: operation="get" with objectType="table", objectName="users", operation="set" with comment text, operation="bulk_get" for discovery',
+  description: 'Manage PostgreSQL object comments - get, set, remove comments on tables, columns, functions, and other database objects. Examples: operation="get" with objectType="table", objectName="users", operation="set" with comment text, operation="bulk_get" for discovery. Use when the user wants to pg manage comments. Unlike pg_manage_constraints, pg_manage_functions, this tool specifically handles pg manage comments.',
   inputSchema: ManageCommentsInputSchema,
   execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
     const validationResult = ManageCommentsInputSchema.safeParse(args);

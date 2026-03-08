@@ -77,7 +77,7 @@ async function executeDebugDatabase(
 
 export const debugDatabaseTool: PostgresTool = {
   name: 'pg_debug_database',
-  description: 'Debug common PostgreSQL issues',
+  description: 'Debug common PostgreSQL issues. Use when the user wants to pg debug database. Unlike pg_analyze_database, pg_monitor_database, this tool specifically handles pg debug database.',
   inputSchema: DebugDatabaseInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = DebugDatabaseInputSchema.safeParse(params);

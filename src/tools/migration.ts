@@ -86,7 +86,7 @@ async function executeExportTableData(
 
 export const exportTableDataTool: PostgresTool = {
   name: 'pg_export_table_data',
-  description: 'Export table data to JSON or CSV format',
+  description: 'Export table data to JSON or CSV format. Use when the user wants to pg export table data. Unlike pg_import_table_data, pg_create_table, this tool specifically handles pg export table data.',
   inputSchema: ExportTableDataInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = ExportTableDataInputSchema.safeParse(params);
@@ -193,7 +193,7 @@ async function executeImportTableData(
 
 export const importTableDataTool: PostgresTool = {
   name: 'pg_import_table_data',
-  description: 'Import data from JSON or CSV file into a table',
+  description: 'Import data from JSON or CSV file into a table. Use when the user wants to pg import table data. Unlike pg_export_table_data, pg_create_table, this tool specifically handles pg import table data.',
   inputSchema: ImportTableDataInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = ImportTableDataInputSchema.safeParse(params);
@@ -286,7 +286,7 @@ async function executeCopyBetweenDatabases(
 
 export const copyBetweenDatabasesTool: PostgresTool = {
   name: 'pg_copy_between_databases',
-  description: 'Copy data between two databases',
+  description: 'Copy data between two databases. Use when the user wants to pg copy between databases.',
   inputSchema: CopyBetweenDatabasesInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = CopyBetweenDatabasesInputSchema.safeParse(params);

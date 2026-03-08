@@ -18,7 +18,7 @@ interface AnalysisResult {
 // Definition previously in TOOL_DEFINITIONS
 const toolDefinition = {
   name: 'pg_analyze_database',
-  description: 'Analyze PostgreSQL database configuration and performance',
+  description: 'Analyze PostgreSQL database configuration and performance. Use when the user wants to pg analyze database. Unlike pg_debug_database, pg_analyze_index_usage, this tool specifically handles pg analyze database.',
   inputSchema: z.object({
     connectionString: z.string().optional()
       .describe('PostgreSQL connection string (optional if POSTGRES_CONNECTION_STRING environment variable or --connection-string CLI option is set)'),

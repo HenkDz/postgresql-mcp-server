@@ -333,7 +333,7 @@ async function executeGetTriggers(  input: GetTriggersInput,  getConnectionStrin
 
 export const getTriggersTool: PostgresTool = {
   name: 'pg_get_triggers',
-  description: 'Get information about PostgreSQL triggers',
+  description: 'Get information about PostgreSQL triggers. Use when the user needs to retrieve a specific resource by identifier. Unlike pg_get_constraints, pg_get_enums, this tool specifically handles pg get triggers.',
   inputSchema: GetTriggersInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = GetTriggersInputSchema.safeParse(params);
@@ -419,7 +419,7 @@ async function executeCreateTrigger(
 
 export const createTriggerTool: PostgresTool = {
   name: 'pg_create_trigger',
-  description: 'Create a PostgreSQL trigger',
+  description: 'Create a PostgreSQL trigger. Use when the user wants to create a new resource that does not yet exist. Unlike pg_create_foreign_key, pg_create_constraint, this tool specifically handles pg create trigger.',
   inputSchema: CreateTriggerInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = CreateTriggerInputSchema.safeParse(params);
@@ -479,7 +479,7 @@ async function executeDropTrigger(
 
 export const dropTriggerTool: PostgresTool = {
   name: 'pg_drop_trigger',
-  description: 'Drop a PostgreSQL trigger',
+  description: 'Drop a PostgreSQL trigger. Use when the user wants to pg drop trigger. Unlike pg_drop_foreign_key, pg_drop_constraint, this tool specifically handles pg drop trigger.',
   inputSchema: DropTriggerInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = DropTriggerInputSchema.safeParse(params);
@@ -534,7 +534,7 @@ async function executeSetTriggerState(
 
 export const setTriggerStateTool: PostgresTool = {
   name: 'pg_set_trigger_state',
-  description: 'Enable or disable a PostgreSQL trigger',
+  description: 'Enable or disable a PostgreSQL trigger. Use when the user wants to pg set trigger state. Unlike pg_create_trigger, pg_drop_trigger, this tool specifically handles pg set trigger state.',
   inputSchema: SetTriggerStateInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = SetTriggerStateInputSchema.safeParse(params);
@@ -554,7 +554,7 @@ export const setTriggerStateTool: PostgresTool = {
 // Complete Consolidated Trigger Management Tool (covers all 4 operations)
 export const manageTriggersTools: PostgresTool = {
   name: 'pg_manage_triggers',
-  description: 'Manage PostgreSQL triggers - get, create, drop, and enable/disable triggers. Examples: operation="get" to list triggers, operation="create" with triggerName, tableName, functionName, operation="drop" with triggerName and tableName, operation="set_state" with triggerName, tableName, enable',
+  description: 'Manage PostgreSQL triggers - get, create, drop, and enable/disable triggers. Examples: operation="get" to list triggers, operation="create" with triggerName, tableName, functionName, operation="drop" with triggerName and tableName, operation="set_state" with triggerName, tableName, enable. Use when the user wants to pg manage triggers. Unlike pg_manage_comments, pg_manage_constraints, this tool specifically handles pg manage triggers.',
   inputSchema: z.object({
     connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
     operation: z.enum(['get', 'create', 'drop', 'set_state']).describe('Operation: get (list triggers), create (new trigger), drop (remove trigger), set_state (enable/disable trigger)'),

@@ -81,7 +81,7 @@ async function executeGetSchemaInfo(
 
 export const getSchemaInfoTool: PostgresTool = {
   name: 'pg_get_schema_info',
-  description: 'Get schema information for a database or specific table',
+  description: 'Get schema information for a database or specific table. Use when the user needs to retrieve a specific resource by identifier. Unlike pg_get_constraints, pg_get_enums, this tool specifically handles pg get schema info.',
   inputSchema: GetSchemaInfoInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = GetSchemaInfoInputSchema.safeParse(params);
@@ -156,7 +156,7 @@ async function executeCreateTable(
 
 export const createTableTool: PostgresTool = {
   name: 'pg_create_table',
-  description: 'Create a new table in the database',
+  description: 'Create a new table in the database. Use when the user wants to create a new resource that does not yet exist. Unlike pg_create_foreign_key, pg_create_constraint, this tool specifically handles pg create table.',
   inputSchema: CreateTableInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = CreateTableInputSchema.safeParse(params);
@@ -261,7 +261,7 @@ async function executeAlterTable(
 
 export const alterTableTool: PostgresTool = {
   name: 'pg_alter_table',
-  description: 'Alter an existing table (add/modify/drop columns)',
+  description: 'Alter an existing table (add/modify/drop columns). Use when the user wants to pg alter table. Unlike pg_export_table_data, pg_import_table_data, this tool specifically handles pg alter table.',
   inputSchema: AlterTableInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = AlterTableInputSchema.safeParse(params);
@@ -427,7 +427,7 @@ async function executeCreateEnumInSchema(
 // Complete Consolidated Schema Management Tool (covers all 5 operations)
 export const manageSchemaTools: PostgresTool = {
   name: 'pg_manage_schema',
-  description: 'Manage PostgreSQL schema - get schema info, create/alter tables, manage enums. Examples: operation="get_info" for table lists, operation="create_table" with tableName and columns, operation="get_enums" to list enums, operation="create_enum" with enumName and values',
+  description: 'Manage PostgreSQL schema - get schema info, create/alter tables, manage enums. Examples: operation="get_info" for table lists, operation="create_table" with tableName and columns, operation="get_enums" to list enums, operation="create_enum" with enumName and values. Use when the user wants to pg manage schema. Unlike pg_manage_comments, pg_manage_constraints, this tool specifically handles pg manage schema.',
   inputSchema: z.object({
     connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
     operation: z.enum(['get_info', 'create_table', 'alter_table', 'get_enums', 'create_enum']).describe('Operation: get_info (schema/table info), create_table (new table), alter_table (modify table), get_enums (list ENUMs), create_enum (new ENUM)'),

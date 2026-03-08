@@ -106,7 +106,7 @@ async function executeCreateEnum(
 
 export const getEnumsTool: PostgresTool = {
   name: 'pg_get_enums',
-  description: 'Get information about PostgreSQL ENUM types',
+  description: 'Get information about PostgreSQL ENUM types. Use when the user needs to retrieve a specific resource by identifier. Unlike pg_get_constraints, pg_get_functions, this tool specifically handles pg get enums.',
   inputSchema: GetEnumsInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = GetEnumsInputSchema.safeParse(params);
@@ -137,7 +137,7 @@ export const getEnumsTool: PostgresTool = {
 
 export const createEnumTool: PostgresTool = {
   name: 'pg_create_enum',
-  description: 'Create a new ENUM type in the database',
+  description: 'Create a new ENUM type in the database. Use when the user wants to create a new resource that does not yet exist. Unlike pg_create_foreign_key, pg_create_constraint, this tool specifically handles pg create enum.',
   inputSchema: CreateEnumInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = CreateEnumInputSchema.safeParse(params);

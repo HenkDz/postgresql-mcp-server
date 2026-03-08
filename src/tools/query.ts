@@ -320,7 +320,7 @@ async function executeManageQuery(
 
 export const manageQueryTool: PostgresTool = {
   name: 'pg_manage_query',
-  description: 'Manage PostgreSQL query analysis and performance - operation="explain" for EXPLAIN plans, operation="get_slow_queries" for slow query analysis, operation="get_stats" for query statistics, operation="reset_stats" for clearing statistics',
+  description: 'Manage PostgreSQL query analysis and performance - operation="explain" for EXPLAIN plans, operation="get_slow_queries" for slow query analysis, operation="get_stats" for query statistics, operation="reset_stats" for clearing statistics. Use when the user wants to extract specific data using a structured query. Unlike pg_manage_comments, pg_manage_constraints, this tool specifically handles pg manage query.',
   inputSchema: ManageQueryInputSchema,
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = ManageQueryInputSchema.safeParse(params);
