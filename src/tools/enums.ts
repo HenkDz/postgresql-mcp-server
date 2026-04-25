@@ -84,17 +84,34 @@ async function executeCreateEnum(
   const db = DatabaseConnection.getInstance();
   try {
     await db.connect(resolvedConnectionString);
-    // Manually quote identifiers using double quotes
-    const qualifiedSchema = `"${schema || 'public'}"`;
+    const schemaName = schema || 'public';
+    const qualifiedSchema = `"${schemaName}"`;
     const qualifiedEnumName = `"${enumName}"`;
     const fullEnumName = `${qualifiedSchema}.${qualifiedEnumName}`;
-    // Use parameterized query for values and add explicit types to map
-    const valuesPlaceholders = values.map((_: string, i: number) => `$${i + 1}`).join(', ');
-    const ifNotExistsClause = ifNotExists ? 'IF NOT EXISTS' : '';
+    // PostgreSQL doesn't accept parameter placeholders ($1) inside DDL like CREATE TYPE.
+    // Embed values as escaped string literals instead.
+    const literalValues = values.map(v => `'${v.replace(/'/g, "''")}'`).join(', ');
+    const createSql = `CREATE TYPE ${fullEnumName} AS ENUM (${literalValues})`;
 
-    const query = `CREATE TYPE ${ifNotExistsClause} ${fullEnumName} AS ENUM (${valuesPlaceholders});`;
-
-    await db.query(query, values);
+    if (ifNotExists) {
+      // PostgreSQL has no native CREATE TYPE IF NOT EXISTS; emulate via DO block.
+      const schemaLit = `'${schemaName.replace(/'/g, "''")}'`;
+      const enumLit = `'${enumName.replace(/'/g, "''")}'`;
+      const guardedSql = `DO $do$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_type t
+    JOIN pg_namespace n ON n.oid = t.typnamespace
+    WHERE n.nspname = ${schemaLit} AND t.typname = ${enumLit} AND t.typtype = 'e'
+  ) THEN
+    EXECUTE $sql$${createSql}$sql$;
+  END IF;
+END
+$do$;`;
+      await db.query(guardedSql);
+    } else {
+      await db.query(createSql);
+    }
     return { schema, enumName, values };
   } catch (error) {
     console.error("Error creating ENUM:", error);

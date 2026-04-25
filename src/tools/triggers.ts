@@ -382,7 +382,11 @@ async function executeCreateTrigger(
     
     const createOrReplace = replace ? 'CREATE OR REPLACE' : 'CREATE';
     const qualifiedTableName = `"${schema}"."${tableName}"`;
-    const qualifiedFunctionName = `"${functionName}"`; // Assuming functionName might also need quoting or schema qualification
+    // Support both bare ("touch_updated_at") and schema-qualified ("public.touch_updated_at") function names.
+    // Quote each identifier part separately so PostgreSQL resolves it correctly.
+    const qualifiedFunctionName = functionName.includes('.')
+      ? functionName.split('.').map(p => `"${p}"`).join('.')
+      : `"${schema}"."${functionName}"`;
 
     let sql = `
       ${createOrReplace} TRIGGER "${triggerName}"
