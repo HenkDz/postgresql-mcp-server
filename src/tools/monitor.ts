@@ -1,7 +1,8 @@
-import { DatabaseConnection } from '../utils/connection.js';
+import { DatabaseConnection, sanitizeErrorMessage } from '../utils/connection.js';
 import { z } from 'zod';
 import type { PostgresTool, GetConnectionStringFn, ToolOutput } from '../types/tool.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+import { redactSqlText } from '../utils/sql.js';
 
 interface MonitoringResult {
   timestamp: string;
@@ -81,13 +82,27 @@ interface Alert {
   context?: Record<string, unknown>;
 }
 
+interface CappedRows<T> {
+  rows: T[];
+  capped: boolean;
+}
+
+const TABLE_METRICS_DIAGNOSTIC_LIMIT = 100;
+const ACTIVE_QUERY_DIAGNOSTIC_LIMIT = 50;
+const LOCK_DIAGNOSTIC_LIMIT = 100;
+const REPLICATION_DIAGNOSTIC_LIMIT = 50;
+
+function formatValidationError(error: z.ZodError): string {
+  return error.errors.map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`).join(', ');
+}
+
 const AlertThresholdsSchema = z.object({
   connectionPercentage: z.number().min(0).max(100).optional().describe("Connection usage percentage threshold"),
   longRunningQuerySeconds: z.number().positive().optional().describe("Long-running query threshold in seconds"),
   cacheHitRatio: z.number().min(0).max(1).optional().describe("Cache hit ratio threshold"),
   deadTuplesPercentage: z.number().min(0).max(100).optional().describe("Dead tuples percentage threshold"),
   vacuumAge: z.number().positive().int().optional().describe("Vacuum age threshold in days"),
-}).describe("Alert thresholds");
+}).strict().describe("Alert thresholds");
 
 const MonitorDatabaseInputSchema = z.object({
   connectionString: z.string().optional(),
@@ -96,7 +111,7 @@ const MonitorDatabaseInputSchema = z.object({
   includeLocks: z.boolean().optional().default(false),
   includeReplication: z.boolean().optional().default(false),
   alertThresholds: AlertThresholdsSchema.optional(),
-});
+}).strict();
 
 type MonitorDatabaseInput = z.infer<typeof MonitorDatabaseInputSchema>;
 
@@ -143,8 +158,15 @@ async function executeMonitorDatabase(
     
     const tableMetricsResult: Record<string, TableMetrics> = {};
     if (includeTables) {
-      const tables = await getTableMetrics(db);
-      
+      const tableMetrics = await getTableMetrics(db);
+      const tables = tableMetrics.rows;
+      if (tableMetrics.capped) {
+        alerts.push({
+          level: 'info',
+          message: `Table metrics output capped at ${TABLE_METRICS_DIAGNOSTIC_LIMIT} rows`
+        });
+      }
+
       for (const table of tables) {
         tableMetricsResult[table.name] = table;
         
@@ -186,8 +208,15 @@ async function executeMonitorDatabase(
     
     let activeQueriesResult: ActiveQueryInfo[] = [];
     if (includeQueries) {
-      activeQueriesResult = await getActiveQueries(db);
-      
+      const activeQueries = await getActiveQueries(db);
+      activeQueriesResult = activeQueries.rows;
+      if (activeQueries.capped) {
+        alerts.push({
+          level: 'info',
+          message: `Active query output capped at ${ACTIVE_QUERY_DIAGNOSTIC_LIMIT} rows`
+        });
+      }
+
       if (alertThresholds?.longRunningQuerySeconds) {
         const threshold = alertThresholds.longRunningQuerySeconds;
         const longRunningQueries = activeQueriesResult.filter(
@@ -195,13 +224,14 @@ async function executeMonitorDatabase(
         );
         
         for (const query of longRunningQueries) {
+          const redactedQuery = redactSqlText(query.query, 100);
           alerts.push({
             level: query.duration > threshold * 2 ? 'critical' : 'warning',
             message: `Long-running query (${query.duration.toFixed(1)}s) by ${query.username}`,
             context: {
               pid: query.pid,
               duration: query.duration,
-              query: query.query.substring(0, 100) + (query.query.length > 100 ? '...' : '')
+              query: redactedQuery
             }
           });
         }
@@ -210,8 +240,15 @@ async function executeMonitorDatabase(
     
     let locksResult: LockInfo[] = [];
     if (includeLocks) {
-      locksResult = await getLockInfo(db);
-      
+      const locks = await getLockInfo(db);
+      locksResult = locks.rows;
+      if (locks.capped) {
+        alerts.push({
+          level: 'info',
+          message: `Lock output capped at ${LOCK_DIAGNOSTIC_LIMIT} rows`
+        });
+      }
+
       const blockingLocks = locksResult.filter(l => !l.granted);
       if (blockingLocks.length > 0) {
         alerts.push({
@@ -226,8 +263,15 @@ async function executeMonitorDatabase(
     
     let replicationResult: ReplicationInfo[] = [];
     if (includeReplication) {
-      replicationResult = await getReplicationInfo(db);
-      
+      const replication = await getReplicationInfo(db);
+      replicationResult = replication.rows;
+      if (replication.capped) {
+        alerts.push({
+          level: 'info',
+          message: `Replication output capped at ${REPLICATION_DIAGNOSTIC_LIMIT} rows`
+        });
+      }
+
       for (const replica of replicationResult) {
         if (replica.replayLag) {
           const lagMatch = replica.replayLag.match(/(\d+):(\d+):(\d+)/);
@@ -262,8 +306,9 @@ async function executeMonitorDatabase(
       alerts
     };
   } catch (error) {
-    console.error("Error monitoring database:", error);
-    throw new McpError(ErrorCode.InternalError, `Failed to monitor database: ${error instanceof Error ? error.message : String(error)}`);
+    const errorMessage = sanitizeErrorMessage(error);
+    console.error("Error monitoring database:", errorMessage);
+    throw new McpError(ErrorCode.InternalError, `Failed to monitor database: ${errorMessage}`);
   } finally {
     await db.disconnect();
   }
@@ -276,7 +321,7 @@ export const monitorDatabaseTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = MonitorDatabaseInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const result = await executeMonitorDatabase(validationResult.data, getConnectionString);
@@ -288,7 +333,7 @@ export const monitorDatabaseTool: PostgresTool = {
         ]
       };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error monitoring database: ${errorMessage}` }], isError: true };
     }
   }
@@ -357,7 +402,7 @@ async function getDatabaseMetrics(db: DatabaseConnection): Promise<DatabaseMetri
 /**
  * Get table-level metrics
  */
-async function getTableMetrics(db: DatabaseConnection): Promise<TableMetrics[]> {
+async function getTableMetrics(db: DatabaseConnection): Promise<CappedRows<TableMetrics>> {
   const tableStats = await db.query<{
     relname: string;
     size: string;
@@ -380,27 +425,32 @@ async function getTableMetrics(db: DatabaseConnection): Promise<TableMetrics[]> 
      FROM pg_class c
      JOIN pg_stat_user_tables s ON s.relid = c.oid
      WHERE c.relkind = 'r'
-     ORDER BY c.relname`
+     ORDER BY pg_total_relation_size(c.oid) DESC, c.relname
+     LIMIT ${TABLE_METRICS_DIAGNOSTIC_LIMIT + 1}`
   );
-  
-  return tableStats.map(table => ({
-    name: table.relname,
-    size: table.size,
-    rowCount: Number.parseInt(table.n_live_tup),
-    deadTuples: Number.parseInt(table.n_dead_tup),
-    lastVacuum: table.last_vacuum,
-    lastAnalyze: table.last_analyze,
-    scanCount: Number.parseInt(table.seq_scan),
-    indexUseRatio: Number.parseInt(table.seq_scan) + Number.parseInt(table.idx_scan) > 0
-      ? Number.parseInt(table.idx_scan) / (Number.parseInt(table.seq_scan) + Number.parseInt(table.idx_scan))
-      : 0
-  }));
+  const visibleTableStats = tableStats.slice(0, TABLE_METRICS_DIAGNOSTIC_LIMIT);
+
+  return {
+    rows: visibleTableStats.map(table => ({
+      name: table.relname,
+      size: table.size,
+      rowCount: Number.parseInt(table.n_live_tup),
+      deadTuples: Number.parseInt(table.n_dead_tup),
+      lastVacuum: table.last_vacuum,
+      lastAnalyze: table.last_analyze,
+      scanCount: Number.parseInt(table.seq_scan),
+      indexUseRatio: Number.parseInt(table.seq_scan) + Number.parseInt(table.idx_scan) > 0
+        ? Number.parseInt(table.idx_scan) / (Number.parseInt(table.seq_scan) + Number.parseInt(table.idx_scan))
+        : 0
+    })),
+    capped: tableStats.length > TABLE_METRICS_DIAGNOSTIC_LIMIT
+  };
 }
 
 /**
  * Get information about active queries
  */
-async function getActiveQueries(db: DatabaseConnection): Promise<ActiveQueryInfo[]> {
+async function getActiveQueries(db: DatabaseConnection): Promise<CappedRows<ActiveQueryInfo>> {
   const queries = await db.query<{
     pid: string;
     usename: string;
@@ -421,32 +471,37 @@ async function getActiveQueries(db: DatabaseConnection): Promise<ActiveQueryInfo
      FROM pg_stat_activity
      WHERE state != 'idle'
        AND pid <> pg_backend_pid()
-     ORDER BY query_start`
+     ORDER BY query_start
+     LIMIT ${ACTIVE_QUERY_DIAGNOSTIC_LIMIT + 1}`
   );
-  
+  const visibleQueries = queries.slice(0, ACTIVE_QUERY_DIAGNOSTIC_LIMIT);
+
   const now = new Date();
-  
-  return queries.map(q => {
-    const startTime = new Date(q.query_start);
-    const durationSeconds = (now.getTime() - startTime.getTime()) / 1000;
-    
-    return {
-      pid: Number.parseInt(q.pid),
-      username: q.usename,
-      database: q.datname,
-      startTime: q.query_start,
-      duration: durationSeconds,
-      state: q.state,
-      waitEvent: q.wait_event || undefined,
-      query: q.query
-    };
-  });
+
+  return {
+    rows: visibleQueries.map(q => {
+      const startTime = new Date(q.query_start);
+      const durationSeconds = (now.getTime() - startTime.getTime()) / 1000;
+
+      return {
+        pid: Number.parseInt(q.pid),
+        username: q.usename,
+        database: q.datname,
+        startTime: q.query_start,
+        duration: durationSeconds,
+        state: q.state,
+        waitEvent: q.wait_event || undefined,
+        query: redactSqlText(q.query)
+      };
+    }),
+    capped: queries.length > ACTIVE_QUERY_DIAGNOSTIC_LIMIT
+  };
 }
 
 /**
  * Get information about locks
  */
-async function getLockInfo(db: DatabaseConnection): Promise<LockInfo[]> {
+async function getLockInfo(db: DatabaseConnection): Promise<CappedRows<LockInfo>> {
   const locks = await db.query<{
     relation: string;
     mode: string;
@@ -468,23 +523,28 @@ async function getLockInfo(db: DatabaseConnection): Promise<LockInfo[]> {
      FROM pg_locks l
      JOIN pg_stat_activity a ON l.pid = a.pid
      WHERE l.pid <> pg_backend_pid()
-     ORDER BY relation, mode`
+     ORDER BY relation, mode
+     LIMIT ${LOCK_DIAGNOSTIC_LIMIT + 1}`
   );
-  
-  return locks.map(lock => ({
-    relation: lock.relation,
-    mode: lock.mode,
-    granted: lock.granted === 't',
-    pid: Number.parseInt(lock.pid),
-    username: lock.usename,
-    query: lock.query
-  }));
+  const visibleLocks = locks.slice(0, LOCK_DIAGNOSTIC_LIMIT);
+
+  return {
+    rows: visibleLocks.map(lock => ({
+      relation: lock.relation,
+      mode: lock.mode,
+      granted: lock.granted === 't',
+      pid: Number.parseInt(lock.pid),
+      username: lock.usename,
+      query: redactSqlText(lock.query)
+    })),
+    capped: locks.length > LOCK_DIAGNOSTIC_LIMIT
+  };
 }
 
 /**
  * Get information about replication
  */
-async function getReplicationInfo(db: DatabaseConnection): Promise<ReplicationInfo[]> {
+async function getReplicationInfo(db: DatabaseConnection): Promise<CappedRows<ReplicationInfo>> {
   const replication = await db.query<{
     client_addr: string | null;
     state: string;
@@ -506,18 +566,24 @@ async function getReplicationInfo(db: DatabaseConnection): Promise<ReplicationIn
        write_lag::text,
        flush_lag::text,
        replay_lag::text
-     FROM pg_stat_replication`
+     FROM pg_stat_replication
+     ORDER BY client_addr NULLS LAST, state
+     LIMIT ${REPLICATION_DIAGNOSTIC_LIMIT + 1}`
   );
-  
-  return replication.map(rep => ({
-    clientAddr: rep.client_addr || 'local',
-    state: rep.state,
-    sentLsn: rep.sent_lsn,
-    writeLsn: rep.write_lsn,
-    flushLsn: rep.flush_lsn,
-    replayLsn: rep.replay_lsn,
-    writeLag: rep.write_lag,
-    flushLag: rep.flush_lag,
-    replayLag: rep.replay_lag
-  }));
-} 
+  const visibleReplication = replication.slice(0, REPLICATION_DIAGNOSTIC_LIMIT);
+
+  return {
+    rows: visibleReplication.map(rep => ({
+      clientAddr: rep.client_addr || 'local',
+      state: rep.state,
+      sentLsn: rep.sent_lsn,
+      writeLsn: rep.write_lsn,
+      flushLsn: rep.flush_lsn,
+      replayLsn: rep.replay_lsn,
+      writeLag: rep.write_lag,
+      flushLag: rep.flush_lag,
+      replayLag: rep.replay_lag
+    })),
+    capped: replication.length > REPLICATION_DIAGNOSTIC_LIMIT
+  };
+}

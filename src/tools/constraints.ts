@@ -1,7 +1,8 @@
-import { DatabaseConnection } from '../utils/connection.js';
+import { DatabaseConnection, sanitizeErrorMessage } from '../utils/connection.js';
 import { z } from 'zod';
 import type { PostgresTool, GetConnectionStringFn, ToolOutput } from '../types/tool.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+import { quoteIdent, quoteQualifiedIdent, redactSqlText } from '../utils/sql.js';
 
 interface ConstraintInfo {
   constraint_name: string;
@@ -15,13 +16,25 @@ interface ConstraintInfo {
   initially_deferred: string;
 }
 
+function toInternalError(prefix: string, error: unknown): McpError {
+  if (error instanceof McpError) {
+    return error;
+  }
+
+  return new McpError(ErrorCode.InternalError, `${prefix}: ${sanitizeErrorMessage(error)}`);
+}
+
+function formatValidationError(error: z.ZodError): string {
+  return error.errors.map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`).join(', ');
+}
+
 // --- Get Constraints Tool ---
 const GetConstraintsInputSchema = z.object({
   connectionString: z.string().optional(),
   schema: z.string().optional().default('public').describe("Schema name"),
   tableName: z.string().optional().describe("Optional table name to filter constraints"),
   constraintType: z.enum(['PRIMARY KEY', 'FOREIGN KEY', 'UNIQUE', 'CHECK']).optional().describe("Filter by constraint type"),
-});
+}).strict();
 type GetConstraintsInput = z.infer<typeof GetConstraintsInputSchema>;
 
 async function executeGetConstraints(
@@ -79,10 +92,13 @@ async function executeGetConstraints(
     `;
     
     const result = await db.query<ConstraintInfo>(constraintsQuery, params);
-    return result;
+    return result.map((constraint) => ({
+      ...constraint,
+      check_clause: constraint.check_clause ? redactSqlText(constraint.check_clause) : constraint.check_clause
+    }));
     
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to get constraints: ${error instanceof Error ? error.message : String(error)}`);
+    throw toInternalError('Failed to get constraints', error);
   } finally {
     await db.disconnect();
   }
@@ -95,7 +111,7 @@ export const getConstraintsTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = GetConstraintsInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const result = await executeGetConstraints(validationResult.data, getConnectionString);
@@ -104,7 +120,7 @@ export const getConstraintsTool: PostgresTool = {
         : `All constraints in schema ${validationResult.data.schema}`;
       return { content: [{ type: 'text', text: message }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error getting constraints: ${errorMessage}` }], isError: true };
     }
   }
@@ -124,22 +140,21 @@ const CreateForeignKeyInputSchema = z.object({
   onDelete: z.enum(['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT']).optional().default('NO ACTION').describe("ON DELETE action"),
   deferrable: z.boolean().optional().default(false).describe("Make constraint deferrable"),
   initiallyDeferred: z.boolean().optional().default(false).describe("Initially deferred"),
-});
+}).strict();
 type CreateForeignKeyInput = z.infer<typeof CreateForeignKeyInputSchema>;
 
 async function executeCreateForeignKey(
   input: CreateForeignKeyInput,
   getConnectionString: GetConnectionStringFn
 ): Promise<{ constraintName: string; tableName: string; created: true }> {
-  const resolvedConnectionString = getConnectionString(input.connectionString);
   const db = DatabaseConnection.getInstance();
-  const { 
-    constraintName, 
-    tableName, 
-    columnNames, 
-    referencedTable, 
-    referencedColumns, 
-    schema, 
+  const {
+    constraintName,
+    tableName,
+    columnNames,
+    referencedTable,
+    referencedColumns,
+    schema,
     referencedSchema,
     onUpdate,
     onDelete,
@@ -148,35 +163,34 @@ async function executeCreateForeignKey(
   } = input;
 
   try {
-    await db.connect(resolvedConnectionString);
-    
     if (columnNames.length !== referencedColumns.length) {
       throw new McpError(ErrorCode.InvalidParams, 'Number of columns must match number of referenced columns');
     }
-    
-    const schemaPrefix = schema !== 'public' ? `"${schema}".` : '';
-    const refSchemaPrefix = (referencedSchema || schema) !== 'public' ? `"${referencedSchema || schema}".` : '';
-    
-    const columnsClause = columnNames.map(col => `"${col}"`).join(', ');
-    const referencedColumnsClause = referencedColumns.map(col => `"${col}"`).join(', ');
-    
+
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
+    const qualifiedReferencedTable = quoteQualifiedIdent(referencedTable, referencedSchema || schema);
+    const columnsClause = columnNames.map(quoteIdent).join(', ');
+    const referencedColumnsClause = referencedColumns.map(quoteIdent).join(', ');
+
     const deferrableClause = deferrable ? ' DEFERRABLE' : '';
     const initiallyDeferredClause = initiallyDeferred ? ' INITIALLY DEFERRED' : '';
-    
+
     const createFkSQL = `
-      ALTER TABLE ${schemaPrefix}"${tableName}" 
-      ADD CONSTRAINT "${constraintName}" 
-      FOREIGN KEY (${columnsClause}) 
-      REFERENCES ${refSchemaPrefix}"${referencedTable}" (${referencedColumnsClause})
+      ALTER TABLE ${qualifiedTableName}
+      ADD CONSTRAINT ${quoteIdent(constraintName)}
+      FOREIGN KEY (${columnsClause})
+      REFERENCES ${qualifiedReferencedTable} (${referencedColumnsClause})
       ON UPDATE ${onUpdate}
       ON DELETE ${onDelete}${deferrableClause}${initiallyDeferredClause}
     `;
-    
+    const resolvedConnectionString = getConnectionString(input.connectionString);
+
+    await db.connect(resolvedConnectionString);
     await db.query(createFkSQL);
-    
+
     return { constraintName, tableName, created: true };
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to create foreign key: ${error instanceof Error ? error.message : String(error)}`);
+    throw toInternalError('Failed to create foreign key', error);
   } finally {
     await db.disconnect();
   }
@@ -189,13 +203,13 @@ export const createForeignKeyTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = CreateForeignKeyInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const result = await executeCreateForeignKey(validationResult.data, getConnectionString);
       return { content: [{ type: 'text', text: `Foreign key ${result.constraintName} created successfully.` }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error creating foreign key: ${errorMessage}` }], isError: true };
     }
   }
@@ -209,31 +223,30 @@ const DropForeignKeyInputSchema = z.object({
   schema: z.string().optional().default('public').describe("Schema name"),
   ifExists: z.boolean().optional().default(true).describe("Include IF EXISTS clause"),
   cascade: z.boolean().optional().default(false).describe("Include CASCADE clause"),
-});
+}).strict();
 type DropForeignKeyInput = z.infer<typeof DropForeignKeyInputSchema>;
 
 async function executeDropForeignKey(
   input: DropForeignKeyInput,
   getConnectionString: GetConnectionStringFn
 ): Promise<{ constraintName: string; tableName: string; dropped: true }> {
-  const resolvedConnectionString = getConnectionString(input.connectionString);
   const db = DatabaseConnection.getInstance();
   const { constraintName, tableName, schema, ifExists, cascade } = input;
 
   try {
-    await db.connect(resolvedConnectionString);
-    
-    const schemaPrefix = schema !== 'public' ? `"${schema}".` : '';
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
     const ifExistsClause = ifExists ? 'IF EXISTS ' : '';
     const cascadeClause = cascade ? ' CASCADE' : '';
-    
-    const dropFkSQL = `ALTER TABLE ${schemaPrefix}"${tableName}" DROP CONSTRAINT ${ifExistsClause}"${constraintName}"${cascadeClause}`;
-    
+
+    const dropFkSQL = `ALTER TABLE ${qualifiedTableName} DROP CONSTRAINT ${ifExistsClause}${quoteIdent(constraintName)}${cascadeClause}`;
+    const resolvedConnectionString = getConnectionString(input.connectionString);
+
+    await db.connect(resolvedConnectionString);
     await db.query(dropFkSQL);
-    
+
     return { constraintName, tableName, dropped: true };
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to drop foreign key: ${error instanceof Error ? error.message : String(error)}`);
+    throw toInternalError('Failed to drop foreign key', error);
   } finally {
     await db.disconnect();
   }
@@ -246,13 +259,13 @@ export const dropForeignKeyTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = DropForeignKeyInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const result = await executeDropForeignKey(validationResult.data, getConnectionString);
       return { content: [{ type: 'text', text: `Foreign key ${result.constraintName} dropped successfully.` }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error dropping foreign key: ${errorMessage}` }], isError: true };
     }
   }
@@ -264,25 +277,24 @@ const CreateConstraintInputSchema = z.object({
   constraintName: z.string().describe("Name of the constraint"),
   tableName: z.string().describe("Table to add the constraint to"),
   constraintType: z.enum(['unique', 'check', 'primary_key']).describe("Type of constraint"),
-  columnNames: z.array(z.string()).optional().describe("Column names (for unique/primary key constraints)"),
+  columnNames: z.array(z.string()).min(1).optional().describe("Column names (for unique/primary key constraints)"),
   checkExpression: z.string().optional().describe("Check expression (for check constraints)"),
   schema: z.string().optional().default('public').describe("Schema name"),
   deferrable: z.boolean().optional().default(false).describe("Make constraint deferrable"),
   initiallyDeferred: z.boolean().optional().default(false).describe("Initially deferred"),
-});
+}).strict();
 type CreateConstraintInput = z.infer<typeof CreateConstraintInputSchema>;
 
 async function executeCreateConstraint(
   input: CreateConstraintInput,
   getConnectionString: GetConnectionStringFn
 ): Promise<{ constraintName: string; tableName: string; constraintType: string; created: true }> {
-  const resolvedConnectionString = getConnectionString(input.connectionString);
   const db = DatabaseConnection.getInstance();
-  const { 
-    constraintName, 
-    tableName, 
-    constraintType, 
-    columnNames, 
+  const {
+    constraintName,
+    tableName,
+    constraintType,
+    columnNames,
     checkExpression,
     schema,
     deferrable,
@@ -290,26 +302,24 @@ async function executeCreateConstraint(
   } = input;
 
   try {
-    await db.connect(resolvedConnectionString);
-    
-    const schemaPrefix = schema !== 'public' ? `"${schema}".` : '';
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
     const deferrableClause = deferrable ? ' DEFERRABLE' : '';
     const initiallyDeferredClause = initiallyDeferred ? ' INITIALLY DEFERRED' : '';
-    
+
     let constraintClause = '';
-    
+
     switch (constraintType) {
       case 'unique':
         if (!columnNames || columnNames.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'Column names are required for unique constraints');
         }
-        constraintClause = `UNIQUE (${columnNames.map(col => `"${col}"`).join(', ')})`;
+        constraintClause = `UNIQUE (${columnNames.map(quoteIdent).join(', ')})`;
         break;
       case 'primary_key':
         if (!columnNames || columnNames.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'Column names are required for primary key constraints');
         }
-        constraintClause = `PRIMARY KEY (${columnNames.map(col => `"${col}"`).join(', ')})`;
+        constraintClause = `PRIMARY KEY (${columnNames.map(quoteIdent).join(', ')})`;
         break;
       case 'check':
         if (!checkExpression) {
@@ -318,18 +328,20 @@ async function executeCreateConstraint(
         constraintClause = `CHECK (${checkExpression})`;
         break;
     }
-    
+
     const createConstraintSQL = `
-      ALTER TABLE ${schemaPrefix}"${tableName}" 
-      ADD CONSTRAINT "${constraintName}" 
+      ALTER TABLE ${qualifiedTableName}
+      ADD CONSTRAINT ${quoteIdent(constraintName)}
       ${constraintClause}${deferrableClause}${initiallyDeferredClause}
     `;
-    
+    const resolvedConnectionString = getConnectionString(input.connectionString);
+
+    await db.connect(resolvedConnectionString);
     await db.query(createConstraintSQL);
-    
+
     return { constraintName, tableName, constraintType, created: true };
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to create constraint: ${error instanceof Error ? error.message : String(error)}`);
+    throw toInternalError('Failed to create constraint', error);
   } finally {
     await db.disconnect();
   }
@@ -342,13 +354,13 @@ export const createConstraintTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = CreateConstraintInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const result = await executeCreateConstraint(validationResult.data, getConnectionString);
       return { content: [{ type: 'text', text: `${result.constraintType} constraint ${result.constraintName} created successfully.` }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error creating constraint: ${errorMessage}` }], isError: true };
     }
   }
@@ -362,31 +374,30 @@ const DropConstraintInputSchema = z.object({
   schema: z.string().optional().default('public').describe("Schema name"),
   ifExists: z.boolean().optional().default(true).describe("Include IF EXISTS clause"),
   cascade: z.boolean().optional().default(false).describe("Include CASCADE clause"),
-});
+}).strict();
 type DropConstraintInput = z.infer<typeof DropConstraintInputSchema>;
 
 async function executeDropConstraint(
   input: DropConstraintInput,
   getConnectionString: GetConnectionStringFn
 ): Promise<{ constraintName: string; tableName: string; dropped: true }> {
-  const resolvedConnectionString = getConnectionString(input.connectionString);
   const db = DatabaseConnection.getInstance();
   const { constraintName, tableName, schema, ifExists, cascade } = input;
 
   try {
-    await db.connect(resolvedConnectionString);
-    
-    const schemaPrefix = schema !== 'public' ? `"${schema}".` : '';
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
     const ifExistsClause = ifExists ? 'IF EXISTS ' : '';
     const cascadeClause = cascade ? ' CASCADE' : '';
-    
-    const dropConstraintSQL = `ALTER TABLE ${schemaPrefix}"${tableName}" DROP CONSTRAINT ${ifExistsClause}"${constraintName}"${cascadeClause}`;
-    
+
+    const dropConstraintSQL = `ALTER TABLE ${qualifiedTableName} DROP CONSTRAINT ${ifExistsClause}${quoteIdent(constraintName)}${cascadeClause}`;
+    const resolvedConnectionString = getConnectionString(input.connectionString);
+
+    await db.connect(resolvedConnectionString);
     await db.query(dropConstraintSQL);
-    
+
     return { constraintName, tableName, dropped: true };
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to drop constraint: ${error instanceof Error ? error.message : String(error)}`);
+    throw toInternalError('Failed to drop constraint', error);
   } finally {
     await db.disconnect();
   }
@@ -399,55 +410,61 @@ export const dropConstraintTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = DropConstraintInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const result = await executeDropConstraint(validationResult.data, getConnectionString);
       return { content: [{ type: 'text', text: `Constraint ${result.constraintName} dropped successfully.` }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error dropping constraint: ${errorMessage}` }], isError: true };
     }
   }
 };
 
+const ManageConstraintsInputSchema = z.object({
+  connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
+  operation: z.enum(['get', 'create_fk', 'drop_fk', 'create', 'drop']).describe('Operation: get (list constraints), create_fk (foreign key), drop_fk (drop foreign key), create (constraint), drop (constraint)'),
+
+  // Common parameters
+  schema: z.string().optional().describe('Schema name (defaults to public)'),
+  constraintName: z.string().optional().describe('Constraint name (required for create_fk/drop_fk/create/drop)'),
+  tableName: z.string().optional().describe('Table name (optional filter for get, required for create_fk/drop_fk/create/drop)'),
+
+  // Get operation parameters
+  constraintType: z.enum(['PRIMARY KEY', 'FOREIGN KEY', 'UNIQUE', 'CHECK']).optional().describe('Filter by constraint type (for get operation)'),
+
+  // Foreign key specific parameters
+  columnNames: z.array(z.string()).min(1).optional().describe('Column names in the table (required for create_fk)'),
+  referencedTable: z.string().optional().describe('Referenced table name (required for create_fk)'),
+  referencedColumns: z.array(z.string()).min(1).optional().describe('Referenced column names (required for create_fk)'),
+  referencedSchema: z.string().optional().describe('Referenced table schema (for create_fk, defaults to same as table schema)'),
+  onUpdate: z.enum(['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT']).optional().describe('ON UPDATE action (for create_fk)'),
+  onDelete: z.enum(['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT']).optional().describe('ON DELETE action (for create_fk)'),
+
+  // Constraint specific parameters
+  constraintTypeCreate: z.enum(['unique', 'check', 'primary_key']).optional().describe('Type of constraint to create (for create operation)'),
+  checkExpression: z.string().optional().describe('Check expression (for create operation with check constraints)'),
+
+  // Common options
+  deferrable: z.boolean().optional().describe('Make constraint deferrable (for create_fk/create operations)'),
+  initiallyDeferred: z.boolean().optional().describe('Initially deferred (for create_fk/create operations)'),
+  ifExists: z.boolean().optional().describe('Include IF EXISTS clause (for drop_fk/drop operations)'),
+  cascade: z.boolean().optional().describe('Include CASCADE clause (for drop_fk/drop operations)')
+}).strict();
+
 // Consolidated Constraint Management Tool
 export const manageConstraintsTool: PostgresTool = {
   name: 'pg_manage_constraints',
   description: 'Manage PostgreSQL constraints - get, create foreign keys, drop foreign keys, create constraints, drop constraints. Examples: operation="get" to list constraints, operation="create_fk" with constraintName, tableName, columnNames, referencedTable, referencedColumns',
-  inputSchema: z.object({
-    connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
-    operation: z.enum(['get', 'create_fk', 'drop_fk', 'create', 'drop']).describe('Operation: get (list constraints), create_fk (foreign key), drop_fk (drop foreign key), create (constraint), drop (constraint)'),
-    
-    // Common parameters
-    schema: z.string().optional().describe('Schema name (defaults to public)'),
-    constraintName: z.string().optional().describe('Constraint name (required for create_fk/drop_fk/create/drop)'),
-    tableName: z.string().optional().describe('Table name (optional filter for get, required for create_fk/drop_fk/create/drop)'),
-    
-    // Get operation parameters
-    constraintType: z.enum(['PRIMARY KEY', 'FOREIGN KEY', 'UNIQUE', 'CHECK']).optional().describe('Filter by constraint type (for get operation)'),
-    
-    // Foreign key specific parameters
-    columnNames: z.array(z.string()).optional().describe('Column names in the table (required for create_fk)'),
-    referencedTable: z.string().optional().describe('Referenced table name (required for create_fk)'),
-    referencedColumns: z.array(z.string()).optional().describe('Referenced column names (required for create_fk)'),
-    referencedSchema: z.string().optional().describe('Referenced table schema (for create_fk, defaults to same as table schema)'),
-    onUpdate: z.enum(['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT']).optional().describe('ON UPDATE action (for create_fk)'),
-    onDelete: z.enum(['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT']).optional().describe('ON DELETE action (for create_fk)'),
-    
-    // Constraint specific parameters  
-    constraintTypeCreate: z.enum(['unique', 'check', 'primary_key']).optional().describe('Type of constraint to create (for create operation)'),
-    checkExpression: z.string().optional().describe('Check expression (for create operation with check constraints)'),
-    
-    // Common options
-    deferrable: z.boolean().optional().describe('Make constraint deferrable (for create_fk/create operations)'),
-    initiallyDeferred: z.boolean().optional().describe('Initially deferred (for create_fk/create operations)'),
-    ifExists: z.boolean().optional().describe('Include IF EXISTS clause (for drop_fk/drop operations)'),
-    cascade: z.boolean().optional().describe('Include CASCADE clause (for drop_fk/drop operations)')
-  }),
-  // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-  execute: async (args: any, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
-    const { 
+  inputSchema: ManageConstraintsInputSchema,
+  execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
+    const validationResult = ManageConstraintsInputSchema.safeParse(args);
+    if (!validationResult.success) {
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
+    }
+
+    const {
       connectionString: connStringArg,
       operation,
       schema,
@@ -466,26 +483,7 @@ export const manageConstraintsTool: PostgresTool = {
       initiallyDeferred,
       ifExists,
       cascade
-    } = args as {
-      connectionString?: string;
-      operation: 'get' | 'create_fk' | 'drop_fk' | 'create' | 'drop';
-      schema?: string;
-      constraintName?: string;
-      tableName?: string;
-      constraintType?: 'PRIMARY KEY' | 'FOREIGN KEY' | 'UNIQUE' | 'CHECK';
-      columnNames?: string[];
-      referencedTable?: string;
-      referencedColumns?: string[];
-      referencedSchema?: string;
-      onUpdate?: 'NO ACTION' | 'RESTRICT' | 'CASCADE' | 'SET NULL' | 'SET DEFAULT';
-      onDelete?: 'NO ACTION' | 'RESTRICT' | 'CASCADE' | 'SET NULL' | 'SET DEFAULT';
-      constraintTypeCreate?: 'unique' | 'check' | 'primary_key';
-      checkExpression?: string;
-      deferrable?: boolean;
-      initiallyDeferred?: boolean;
-      ifExists?: boolean;
-      cascade?: boolean;
-    };
+    } = validationResult.data;
 
     try {
       switch (operation) {
@@ -591,8 +589,8 @@ export const manageConstraintsTool: PostgresTool = {
       }
 
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error executing ${operation} operation: ${errorMessage}` }], isError: true };
     }
   }
-}; 
+};

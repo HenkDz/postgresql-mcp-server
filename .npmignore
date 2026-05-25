@@ -10,8 +10,6 @@ tsconfig.json
 .env*
 .editorconfig
 
-# Documentation (development only)
-docs/
 examples/
 REFACTOR_PROGRESS.md
 TOOLS.md
@@ -36,4 +34,4 @@ yarn.lock
 # Misc
 *.tsbuildinfo
 .DS_Store
-Thumbs.db 
+Thumbs.db

@@ -1,103 +1,34 @@
 # PostgreSQL MCP Server Documentation
 
-## Overview
+Start with the current authoritative docs:
 
-The PostgreSQL MCP Server is a Model Context Protocol (MCP) server that provides PostgreSQL database management capabilities. This documentation set covers all aspects of using, understanding, and developing the server.
+- [README](../README.md): installation, security modes, runtime options, and feature overview.
+- [Security Posture](../SECURITY.md): sandboxing, approvals, audit events, non-goals, and deployment checklist.
+- [Complete Tool Schema Reference](../TOOL_SCHEMAS.md): all tool parameters, examples, limits, and security notes.
 
-## Documentation Structure
+Supporting docs:
 
-### 1. [README](../README.md)
-- Project overview
-- Feature summary
-- Installation instructions
-- Basic usage
-- Security considerations
-- Best practices
+- [Usage Guide](USAGE.md): common hardened workflows.
+- [PostgreSQL Role Templates](POSTGRES_ROLES.md): least-privilege database grants for readonly, writer, schema-admin, and role-admin deployments.
+- [Technical Notes](TECHNICAL.md): architecture, security policy, SQL safety, redaction, filesystem sandbox, and timeout model.
+- [Developer Guide](DEVELOPER.md): contribution workflow, test commands, and security rules for new tools.
+- [Development Guide](DEVELOPMENT.md): setup, change workflow, documentation rules, and release checklist.
 
-### 2. [Usage Guide](USAGE.md)
-- Detailed tool usage
-- Common patterns
-- Configuration examples
-- Troubleshooting
-- Best practices
-- Common issues and solutions
+## Security Defaults
 
-### 3. [Technical Documentation](TECHNICAL.md)
-- Architecture overview
-- Tool specifications
-- Implementation details
-- Error handling
-- Performance considerations
-- Security implementation
+The server starts in `readonly` mode. Per-tool connection strings are disabled by default. DML requires `write`, DDL/filesystem/roles require `admin`, arbitrary SQL and raw SQL fragments require `unsafe`, and destructive operations also require `--allow-destructive`.
 
-### 4. [Development Guide](DEVELOPMENT.md)
-- Development environment setup
-- Project structure
-- Adding new features
-- Testing guidelines
-- Error handling
-- Documentation standards
-- Release process
+Use a fixed server-level PostgreSQL connection string and a least-privilege database role whenever possible. Start from [PostgreSQL Role Templates](POSTGRES_ROLES.md) when provisioning deployment credentials.
 
-## Quick Start
+## Quick Commands
 
-1. **Installation**
-   ```bash
-   npm install postgresql-mcp-server
-   ```
+```bash
+npm install
+npm run test:run
+npm run build
+```
 
-2. **Basic Usage**
-   ```typescript
-   // Analyze database
-   const result = await useMcpTool("postgresql-mcp", "analyze_database", {
-     connectionString: "postgresql://user:password@localhost:5432/dbname",
-     analysisType: "performance"
-   });
-   ```
-
-## Tool Reference
-
-### 1. analyze_database
-Analyzes PostgreSQL database configuration and performance.
-- [Technical Specification](TECHNICAL.md#1-analyze_database)
-- [Usage Guide](USAGE.md#1-database-analysis)
-- [Implementation Details](DEVELOPMENT.md#1-creating-a-new-tool)
-
-
-### 2. debug_database
-Helps troubleshoot database issues.
-- [Technical Specification](TECHNICAL.md#2-debug_database)
-- [Usage Guide](USAGE.md#2-database-debugging)
-- [Implementation Details](DEVELOPMENT.md#2-adding-database-features)
-
-## Contributing
-
-See the [Development Guide](DEVELOPMENT.md) for detailed information on:
-- Setting up development environment
-- Code style and standards
-- Testing requirements
-- Documentation guidelines
-- Release process
-
-## License
-
-This project is licensed under the GNU Affero General Public License v3.0 (AGPLv3).
-See the [LICENSE](../LICENSE) file for details.
-
-## Support
-
-- Review the [Usage Guide](USAGE.md) for common issues
-- Check [Technical Documentation](TECHNICAL.md) for implementation details
-- Follow the [Development Guide](DEVELOPMENT.md) for contribution guidelines
-- Submit issues through the project's issue tracker
-
-## Version History
-
-See [CHANGELOG.md](../CHANGELOG.md) for a detailed list of changes.
-
-## Additional Resources
-
-- [PostgreSQL Documentation](https://www.postgresql.org/docs/)
-- [MCP Protocol Documentation](https://modelcontextprotocol.org/docs/)
-- [Node.js Documentation](https://nodejs.org/docs/)
-- [TypeScript Documentation](https://www.typescriptlang.org/docs/)
+```bash
+POSTGRES_CONNECTION_STRING="postgresql://readonly_user:pass@localhost:5432/app" \
+  npx @henkey/postgres-mcp-server
+```

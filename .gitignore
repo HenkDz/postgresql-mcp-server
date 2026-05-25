@@ -1,5 +1,6 @@
 node_modules/
 build/
+.npm-cache/
 *.log
 .env*
 .cursor/mcp.json

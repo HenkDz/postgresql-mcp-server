@@ -1,11 +1,12 @@
 import { z } from 'zod';
 // Remove direct import of sql from @vercel/postgres
 // import { sql } from '@vercel/postgres'; 
-import { DatabaseConnection } from '../utils/connection.js'; // Use the custom connection wrapper
+import { DatabaseConnection, sanitizeErrorMessage } from '../utils/connection.js'; // Use the custom connection wrapper
 // Remove MCP specific type imports - rely on structural typing
 // import type { MCPToolDefinition, MCPToolExecuteInput } from '../types.js';
 import type { PostgresTool, GetConnectionStringFn, ToolOutput } from '../types/tool.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+import { buildCreateEnumTypeSql } from '../utils/sql.js';
 
 // Define return type structure similar to schema.ts
 
@@ -19,7 +20,7 @@ const GetEnumsInputSchema = z.object({
   connectionString: z.string().optional(),
   schema: z.string().optional().default('public').describe('Schema name (defaults to public)'),
   enumName: z.string().optional().describe('Optional specific ENUM name to filter by'),
-});
+}).strict();
 
 type GetEnumsInput = z.infer<typeof GetEnumsInputSchema>;
 
@@ -28,8 +29,8 @@ const CreateEnumInputSchema = z.object({
   enumName: z.string().describe('Name of the ENUM type to create'),
   values: z.array(z.string()).min(1).describe('List of values for the ENUM type'),
   schema: z.string().optional().default('public').describe('Schema name (defaults to public)'),
-  ifNotExists: z.boolean().optional().default(false).describe('Include IF NOT EXISTS clause'),
-});
+  ifNotExists: z.boolean().optional().default(false).describe('Ignore duplicate type errors by wrapping CREATE TYPE in a DO block'),
+}).strict();
 
 type CreateEnumInput = z.infer<typeof CreateEnumInputSchema>;
 
@@ -47,7 +48,7 @@ async function executeGetEnums(
       SELECT 
           n.nspname as enum_schema,
           t.typname as enum_name, 
-          array_agg(e.enumlabel ORDER BY e.enumsortorder) as enum_values
+          array_agg(e.enumlabel::text ORDER BY e.enumsortorder) as enum_values
       FROM pg_type t 
       JOIN pg_enum e ON t.oid = e.enumtypid
       JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
@@ -67,8 +68,10 @@ async function executeGetEnums(
     return result;
 
   } catch (error) {
-    console.error("Error fetching ENUMs:", error);
-    throw new McpError(ErrorCode.InternalError, `Failed to fetch ENUMs: ${error instanceof Error ? error.message : String(error)}`);
+    if (error instanceof McpError) {
+      throw error;
+    }
+    throw new McpError(ErrorCode.InternalError, `Failed to fetch ENUMs: ${sanitizeErrorMessage(error)}`);
   } finally {
     await db.disconnect();
   }
@@ -78,27 +81,21 @@ async function executeGetEnums(
 async function executeCreateEnum(
   input: CreateEnumInput, 
   getConnectionString: GetConnectionStringFn
-): Promise<{ schema?: string; enumName: string; values: string[]}> {
-  const resolvedConnectionString = getConnectionString(input.connectionString);
+): Promise<{ schema?: string; enumName: string; valueCount: number}> {
   const { enumName, values, schema, ifNotExists } = input;
   const db = DatabaseConnection.getInstance();
   try {
+    const query = buildCreateEnumTypeSql(enumName, values, schema || 'public', ifNotExists);
+    const resolvedConnectionString = getConnectionString(input.connectionString);
+
     await db.connect(resolvedConnectionString);
-    // Manually quote identifiers using double quotes
-    const qualifiedSchema = `"${schema || 'public'}"`;
-    const qualifiedEnumName = `"${enumName}"`;
-    const fullEnumName = `${qualifiedSchema}.${qualifiedEnumName}`;
-    // Use parameterized query for values and add explicit types to map
-    const valuesPlaceholders = values.map((_: string, i: number) => `$${i + 1}`).join(', ');
-    const ifNotExistsClause = ifNotExists ? 'IF NOT EXISTS' : '';
-
-    const query = `CREATE TYPE ${ifNotExistsClause} ${fullEnumName} AS ENUM (${valuesPlaceholders});`;
-
-    await db.query(query, values);
-    return { schema, enumName, values };
+    await db.query(query);
+    return { schema, enumName, valueCount: values.length };
   } catch (error) {
-    console.error("Error creating ENUM:", error);
-    throw new McpError(ErrorCode.InternalError, `Failed to create ENUM ${enumName}: ${error instanceof Error ? error.message : String(error)}`);
+    if (error instanceof McpError) {
+      throw error;
+    }
+    throw new McpError(ErrorCode.InternalError, `Failed to create ENUM ${enumName}: ${sanitizeErrorMessage(error)}`);
   } finally {
       await db.disconnect();
   }
@@ -126,7 +123,7 @@ export const getEnumsTool: PostgresTool = {
         ],
       };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return {
         content: [{ type: 'text', text: `Error getting ENUMs: ${errorMessage}` }],
         isError: true,
@@ -157,7 +154,7 @@ export const createEnumTool: PostgresTool = {
         ],
       };
     } catch (error) {
-        const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+        const errorMessage = sanitizeErrorMessage(error);
         return {
             content: [{ type: 'text', text: `Error creating ENUM: ${errorMessage}` }],
             isError: true,
@@ -166,4 +163,4 @@ export const createEnumTool: PostgresTool = {
   }
 };
 
-// Potential future additions: dropEnum, alterEnumAddValue, alterEnumRenameValue 
+// Potential future additions: dropEnum, alterEnumAddValue, alterEnumRenameValue

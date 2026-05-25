@@ -11,6 +11,9 @@
   "files": [
     "build/",
     "README.md",
+    "SECURITY.md",
+    "docs/",
+    "scripts/",
     "LICENSE",
     "TOOL_SCHEMAS.md"
   ],
@@ -21,9 +24,23 @@
     "build": "tsc && node -e \"const fs = require('fs'); const path = 'build/index.js'; const stats = fs.statSync(path); fs.chmodSync(path, stats.mode | parseInt('755', 8));\"",
     "start": "node build/index.js",
     "dev": "tsc -w & nodemon build/index.js",
-    "lint": "eslint . --ext .ts",
+    "lint": "eslint .",
     "test": "vitest",
-    "prepublishOnly": "npm run build",
+    "test:run": "vitest run --pool=threads --maxWorkers=1 --minWorkers=1",
+    "test:integration": "vitest run src/integration --pool=threads --maxWorkers=1 --minWorkers=1",
+    "verify:audit": "node scripts/verify-audit.mjs",
+    "verify:build": "node scripts/verify-build.mjs",
+    "verify:cli": "node scripts/verify-cli.mjs",
+    "verify:connection-lifecycle": "node scripts/verify-connection-lifecycle.mjs",
+    "verify:connection-lifecycle-selftest": "node scripts/verify-connection-lifecycle-selftest.mjs",
+    "verify:docs": "node scripts/verify-docs.mjs",
+    "verify:docker": "node scripts/verify-docker.mjs",
+    "verify:mcp": "node scripts/verify-mcp.mjs",
+    "verify:package": "node scripts/verify-package.mjs",
+    "verify:packed-install": "node scripts/verify-packed-install.mjs",
+    "verify:security-docs": "node scripts/verify-security-docs.mjs",
+    "verify:workflows": "node scripts/verify-workflows.mjs",
+    "prepublishOnly": "npm run test:run && npm run build && npm run verify:audit && npm run verify:build && npm run verify:cli && npm run verify:connection-lifecycle && npm run verify:connection-lifecycle-selftest && npm run verify:docs && npm run verify:security-docs && npm run verify:docker && npm run verify:mcp && npm run verify:workflows && npm run verify:package && npm run verify:packed-install",
     "postinstall": "echo 'postgres-mcp-server installed successfully! Run with: npx @henkey/postgres-mcp-server'"
   },
   "keywords": [
@@ -53,22 +70,28 @@
   },
   "homepage": "https://github.com/HenkDz/postgresql-mcp-server#readme",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "latest",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "commander": "^12.1.0",
-    "pg": "^8.16.3",
-    "pg-monitor": "^3.0.0",
-    "pg-query-stream": "^4.2.4",
-    "zod": "^3.24.4",
-    "zod-to-json-schema": "^3.24.5"
+    "pg": "^8.21.0",
+    "pg-monitor": "^3.1.0",
+    "pg-query-stream": "^4.15.0",
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
-    "@types/node": "^20.11.17",
-    "@types/pg": "^8.10.2",
-    "@typescript-eslint/eslint-plugin": "^7.1.0",
-    "@typescript-eslint/parser": "^7.1.0",
-    "eslint": "^8.57.0",
-    "nodemon": "^3.0.3",
-    "typescript": "^5.3.3",
+    "@types/node": "^20.19.41",
+    "@types/pg": "^8.20.0",
+    "@typescript-eslint/eslint-plugin": "^8.59.4",
+    "@typescript-eslint/parser": "^8.59.4",
+    "eslint": "^9.39.4",
+    "nodemon": "^3.1.14",
+    "typescript": "^5.9.3",
     "vitest": "^3.2.4"
+  },
+  "overrides": {
+    "picomatch": "^4.0.4",
+    "postcss": "^8.5.10",
+    "rollup": "^4.59.0",
+    "vite": "6.4.2"
   }
 }

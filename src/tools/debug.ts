@@ -1,7 +1,8 @@
-import { DatabaseConnection } from '../utils/connection.js';
+import { DatabaseConnection, sanitizeErrorMessage } from '../utils/connection.js';
 import { z } from 'zod';
 import type { PostgresTool, GetConnectionStringFn, ToolOutput } from '../types/tool.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+import { redactSqlText } from '../utils/sql.js';
 
 interface DebugResult {
   issue: string;
@@ -38,11 +39,20 @@ interface ReplicationStatus {
   replay_lag: string | null;
 }
 
+const SLOW_QUERY_DIAGNOSTIC_LIMIT = 25;
+const UNUSED_INDEX_DIAGNOSTIC_LIMIT = 50;
+const LOCK_DIAGNOSTIC_LIMIT = 50;
+const REPLICATION_DIAGNOSTIC_LIMIT = 50;
+
+function formatValidationError(error: z.ZodError): string {
+  return error.errors.map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`).join(', ');
+}
+
 const DebugDatabaseInputSchema = z.object({
   connectionString: z.string().optional(),
   issue: z.enum(['connection', 'performance', 'locks', 'replication']),
   logLevel: z.enum(['info', 'debug', 'trace']).optional().default('info'),
-});
+}).strict();
 
 type DebugDatabaseInput = z.infer<typeof DebugDatabaseInputSchema>;
 
@@ -82,9 +92,8 @@ export const debugDatabaseTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = DebugDatabaseInputSchema.safeParse(params);
     if (!validationResult.success) {
-      const errorDetails = validationResult.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', ');
       return {
-        content: [{ type: 'text', text: `Invalid input: ${errorDetails}` }],
+        content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }],
         isError: true,
       };
     }
@@ -100,7 +109,7 @@ export const debugDatabaseTool: PostgresTool = {
         ],
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorMessage = sanitizeErrorMessage(error);
       return {
         content: [{ type: 'text', text: `Error debugging database: ${errorMessage}` }],
         isError: true,
@@ -158,7 +167,7 @@ async function debugConnection(db: DatabaseConnection): Promise<DebugResult> {
 
   } catch (error: unknown) {
     result.status = 'error';
-    result.details.push(`Connection error: ${error instanceof Error ? error.message : String(error)}`);
+    result.details.push(`Connection error: ${sanitizeErrorMessage(error)}`);
   }
 
   return result;
@@ -179,14 +188,20 @@ async function debugPerformance(db: DatabaseConnection): Promise<DebugResult> {
        FROM pg_stat_activity
        WHERE state = 'active'
          AND query NOT LIKE '%pg_stat_activity%'
-         AND query_start < now() - interval '30 second'`
+         AND query_start < now() - interval '30 second'
+       ORDER BY query_start
+       LIMIT ${SLOW_QUERY_DIAGNOSTIC_LIMIT + 1}`
     );
+    const visibleSlowQueries = slowQueries.slice(0, SLOW_QUERY_DIAGNOSTIC_LIMIT);
 
-    if (slowQueries.length > 0) {
+    if (visibleSlowQueries.length > 0) {
       result.status = 'warning';
       result.details.push('Long-running queries detected:');
-      for (const q of slowQueries) {
-        result.details.push(`Duration: ${q.duration}s - Query: ${q.query}`);
+      for (const q of visibleSlowQueries) {
+        result.details.push(`Duration: ${q.duration}s - Query: ${redactSqlText(q.query)}`);
+      }
+      if (slowQueries.length > SLOW_QUERY_DIAGNOSTIC_LIMIT) {
+        result.details.push(`Additional long-running queries omitted after ${SLOW_QUERY_DIAGNOSTIC_LIMIT} rows.`);
       }
       result.recommendations.push(
         'Review and optimize slow queries',
@@ -203,15 +218,21 @@ async function debugPerformance(db: DatabaseConnection): Promise<DebugResult> {
              s.idx_scan
       FROM pg_stat_user_indexes s
       WHERE s.idx_scan = 0
-        AND s.schemaname NOT IN ('pg_catalog', 'information_schema')`
+        AND s.schemaname NOT IN ('pg_catalog', 'information_schema')
+      ORDER BY s.schemaname, s.relname, s.indexrelname
+      LIMIT ${UNUSED_INDEX_DIAGNOSTIC_LIMIT + 1}`
     );
+    const visibleUnusedIndexes = unusedIndexes.slice(0, UNUSED_INDEX_DIAGNOSTIC_LIMIT);
 
-    if (unusedIndexes.length > 0) {
+    if (visibleUnusedIndexes.length > 0) {
       result.details.push('Unused indexes found:');
-      for (const idx of unusedIndexes) {
+      for (const idx of visibleUnusedIndexes) {
         result.details.push(
           `${idx.schemaname}.${idx.tablename} - ${idx.indexname}`
         );
+      }
+      if (unusedIndexes.length > UNUSED_INDEX_DIAGNOSTIC_LIMIT) {
+        result.details.push(`Additional unused indexes omitted after ${UNUSED_INDEX_DIAGNOSTIC_LIMIT} rows.`);
       }
       result.recommendations.push(
         'Consider removing unused indexes',
@@ -221,7 +242,7 @@ async function debugPerformance(db: DatabaseConnection): Promise<DebugResult> {
 
   } catch (error: unknown) {
     result.status = 'error';
-    result.details.push(`Performance analysis error: ${error instanceof Error ? error.message : String(error)}`);
+    result.details.push(`Performance analysis error: ${sanitizeErrorMessage(error)}`);
   }
 
   return result;
@@ -257,17 +278,23 @@ async function debugLocks(db: DatabaseConnection): Promise<DebugResult> {
             AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid
             AND blocking_locks.pid != blocked_locks.pid
        JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
-       WHERE NOT blocked_locks.GRANTED`
+       WHERE NOT blocked_locks.GRANTED
+       ORDER BY blocked_locks.pid, blocking_locks.pid
+       LIMIT ${LOCK_DIAGNOSTIC_LIMIT + 1}`
     );
+    const visibleLocks = locks.slice(0, LOCK_DIAGNOSTIC_LIMIT);
 
-    if (locks.length > 0) {
+    if (visibleLocks.length > 0) {
       result.status = 'warning';
       result.details.push('Lock conflicts detected:');
-      for (const lock of locks) {
+      for (const lock of visibleLocks) {
         result.details.push(
           `Process ${lock.blocked_pid} (${lock.blocked_user}) blocked by process ${lock.blocking_pid} (${lock.blocking_user})`
         );
-        result.details.push(`Blocked query: ${lock.blocked_statement}`);
+        result.details.push(`Blocked query: ${redactSqlText(lock.blocked_statement)}`);
+      }
+      if (locks.length > LOCK_DIAGNOSTIC_LIMIT) {
+        result.details.push(`Additional lock conflicts omitted after ${LOCK_DIAGNOSTIC_LIMIT} rows.`);
       }
       result.recommendations.push(
         'Consider killing blocking queries if appropriate',
@@ -278,7 +305,7 @@ async function debugLocks(db: DatabaseConnection): Promise<DebugResult> {
 
   } catch (error: unknown) {
     result.status = 'error';
-    result.details.push(`Lock analysis error: ${error instanceof Error ? error.message : String(error)}`);
+    result.details.push(`Lock analysis error: ${sanitizeErrorMessage(error)}`);
   }
 
   return result;
@@ -304,10 +331,13 @@ async function debugReplication(db: DatabaseConnection): Promise<DebugResult> {
               write_lag,
               flush_lag,
               replay_lag
-       FROM pg_stat_replication`
+       FROM pg_stat_replication
+       ORDER BY client_addr NULLS LAST, state
+       LIMIT ${REPLICATION_DIAGNOSTIC_LIMIT + 1}`
     );
+    const visibleReplicationStatus = replicationStatus.slice(0, REPLICATION_DIAGNOSTIC_LIMIT);
 
-    if (replicationStatus.length === 0) {
+    if (visibleReplicationStatus.length === 0) {
       result.details.push('No active replication detected');
       result.recommendations.push(
         'If replication is expected, check configuration',
@@ -319,7 +349,7 @@ async function debugReplication(db: DatabaseConnection): Promise<DebugResult> {
 
     result.status = 'ok'; // Default to ok, specific checks might change it
     result.details.push('Replication status:');
-    for (const status of replicationStatus) {
+    for (const status of visibleReplicationStatus) {
       result.details.push(
         `Replica: ${status.client_addr}, State: ${status.state}, Sent LSN: ${status.sent_lsn}, Replay LSN: ${status.replay_lsn}`
       );
@@ -338,10 +368,13 @@ async function debugReplication(db: DatabaseConnection): Promise<DebugResult> {
         );
       }
     }
+    if (replicationStatus.length > REPLICATION_DIAGNOSTIC_LIMIT) {
+      result.details.push(`Additional replication rows omitted after ${REPLICATION_DIAGNOSTIC_LIMIT} rows.`);
+    }
 
   } catch (error: unknown) {
     result.status = 'error';
-    result.details.push(`Replication analysis error: ${error instanceof Error ? error.message : String(error)}`);
+    result.details.push(`Replication analysis error: ${sanitizeErrorMessage(error)}`);
   }
 
   return result;

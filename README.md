@@ -3,7 +3,7 @@
 
 A Model Context Protocol (MCP) server that provides comprehensive PostgreSQL database management capabilities for AI assistants.
 
-**🚀 What's New**: This server has been completely redesigned from 46 individual tools to 17 intelligent tools through consolidation (34→8 meta-tools) and enhancement (+4 new tools), providing better AI discovery while adding powerful data manipulation and comment management capabilities.
+**🚀 What's New**: This server has been completely redesigned from 46 individual tools to 18 intelligent tools through consolidation (34→8 meta-tools) and enhancement (+4 new tools), providing better AI discovery while adding powerful data manipulation and comment management capabilities.
 
 ## Quick Start
 
@@ -106,11 +106,142 @@ Add to your MCP client configuration:
 }
 ```
 
+## Security Modes
+
+The server now starts in `readonly` mode by default. Tools may still be listed for MCP discovery, but every call is classified and checked before it reaches the database.
+
+| Mode | Allows | Blocks by default |
+| ---- | ------ | ----------------- |
+| `readonly` | schema inspection, analysis, monitoring, SELECT-style query tools | mutations, DDL, role changes, filesystem import/export, arbitrary SQL |
+| `write` | readonly operations plus data mutations | DDL, role changes, filesystem import/export, arbitrary SQL |
+| `admin` | write operations plus schema, index, function, trigger, RLS, role, and filesystem tools | arbitrary SQL |
+| `unsafe` | all tool categories, including arbitrary SQL | destructive operations unless explicitly allowed |
+
+Destructive operations such as drops, resets, and arbitrary SQL also require explicit opt-in:
+
+```bash
+# Default: readonly, no per-tool connection strings
+npx @henkey/postgres-mcp-server --connection-string "postgresql://readonly_user:pass@host:5432/db"
+
+# Enable DML mutations, but still block DDL/admin/arbitrary SQL
+npx @henkey/postgres-mcp-server --security-mode write --connection-string "postgresql://app_writer:pass@host:5432/db"
+
+# Enable admin tools and destructive operations
+npx @henkey/postgres-mcp-server --security-mode admin --allow-destructive --connection-string "postgresql://admin_user:pass@host:5432/db"
+
+# Enable arbitrary SQL only for trusted local/admin use
+npx @henkey/postgres-mcp-server --security-mode unsafe --allow-destructive --connection-string "postgresql://admin_user:pass@host:5432/db"
+```
+
+Per-tool `connectionString`, `sourceConnectionString`, and `targetConnectionString` arguments are disabled by default. Prefer a fixed server-level connection string with a least-privilege PostgreSQL role. For development only, enable per-tool connection strings with `--allow-tool-connection-string` or `POSTGRES_MCP_ALLOW_TOOL_CONNECTION_STRING=true`.
+Explicit per-tool, CLI, and `POSTGRES_CONNECTION_STRING` values must be non-empty strings. Blank higher-priority connection strings fail validation instead of falling back to lower-priority sources.
+
+Optionally restrict all server-level and per-tool connection strings to an allowlist with `--allowed-connection-target`, `allowedConnectionTargets`, or `POSTGRES_MCP_ALLOWED_CONNECTION_TARGETS`. Target patterns use `[user@]host[:port][/database]`; omitted fields are unconstrained and `*` is allowed only as a full-field wildcard, for example `readonly@db.internal:5432/app` or `*@localhost:*/dev`.
+
+For deployment grants, see [PostgreSQL Role Templates](./docs/POSTGRES_ROLES.md). The templates split readonly, writer, schema-admin, and role-admin credentials so the PostgreSQL role remains aligned with the selected MCP `securityMode`.
+
+Security settings can also be placed in the tools config file:
+
+```json
+{
+  "securityMode": "readonly",
+  "allowDestructive": false,
+  "allowToolConnectionString": false,
+  "workspaceDir": "/path/to/mcp-workspace",
+  "auditFile": "/path/to/postgres-mcp-audit.jsonl",
+  "maxConnections": 20,
+  "idleTimeoutMillis": 30000,
+  "connectionTimeoutMillis": 2000,
+  "maxFileBytes": 10485760,
+  "statementTimeoutMs": 30000,
+  "queryTimeoutMs": 45000,
+  "lockTimeoutMs": 10000,
+  "idleInTransactionSessionTimeoutMs": 60000,
+  "allowedConnectionTargets": [
+    "readonly@db.internal:5432/app"
+  ],
+  "enabledTools": [
+    "pg_analyze_database",
+    "pg_manage_schema",
+    "pg_execute_query"
+  ]
+}
+```
+
+Runtime configuration precedence is CLI options, then the tools config file, then environment variables. Explicit `false` values in the tools config override enabling environment variables such as `POSTGRES_MCP_ALLOW_DESTRUCTIVE=true`.
+
+If a tools config path is provided, the server treats it as required: unreadable, malformed, non-object, incorrectly typed, unknown-key, invalid `securityMode`, or unknown `enabledTools` entries stop startup instead of falling back to all available tools.
+
+CLI options:
+
+- `--version`
+- `--connection-string`
+- `--tools-config`
+- `--security-mode`
+- `--allow-destructive`
+- `--allow-tool-connection-string`
+- `--workspace-dir`
+- `--audit-file`
+- `--max-connections`
+- `--idle-timeout-ms`
+- `--connection-timeout-ms`
+- `--max-file-bytes`
+- `--statement-timeout-ms`
+- `--query-timeout-ms`
+- `--lock-timeout-ms`
+- `--idle-in-transaction-session-timeout-ms`
+- `--allowed-connection-target`
+
+Environment variables:
+
+- `POSTGRES_TOOLS_CONFIG=/path/to/tools.json`
+- `POSTGRES_MCP_SECURITY_MODE=readonly|write|admin|unsafe`
+- `POSTGRES_MCP_ALLOW_DESTRUCTIVE=true`
+- `POSTGRES_MCP_ALLOW_TOOL_CONNECTION_STRING=true`
+- `POSTGRES_MCP_WORKSPACE_DIR=/path/to/mcp-workspace`
+- `POSTGRES_MCP_AUDIT_FILE=/path/to/postgres-mcp-audit.jsonl`
+- `POSTGRES_MCP_MAX_CONNECTIONS=20`
+- `POSTGRES_MCP_IDLE_TIMEOUT_MS=30000`
+- `POSTGRES_MCP_CONNECTION_TIMEOUT_MS=2000`
+- `POSTGRES_MCP_MAX_FILE_BYTES=10485760`
+- `POSTGRES_MCP_STATEMENT_TIMEOUT_MS=60000`
+- `POSTGRES_MCP_QUERY_TIMEOUT_MS=65000`
+- `POSTGRES_MCP_LOCK_TIMEOUT_MS=10000`
+- `POSTGRES_MCP_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS=60000`
+- `POSTGRES_MCP_ALLOWED_CONNECTION_TARGETS=readonly@db.internal:5432/app,*@localhost:*/dev`
+- `POSTGRES_MCP_DEBUG_SQL=true` to opt into verbose `pg-monitor` SQL tracing. This may log raw SQL and bind values, so leave it disabled unless you are debugging a trusted local database.
+
+Boolean environment flags must be exactly `true` or `false` when set.
+Numeric resource settings from CLI, tools config, or environment variables must be positive integers. Runtime defaults use a 20-connection pool, a 30000 ms pool idle timeout, a 2000 ms connection timeout, a 60000 ms PostgreSQL `statement_timeout`, a 65000 ms node-postgres query timeout, a 10000 ms PostgreSQL `lock_timeout`, and a 60000 ms PostgreSQL `idle_in_transaction_session_timeout`. Pool and timeout settings can be raised or lowered with `--max-connections`, `--idle-timeout-ms`, `--connection-timeout-ms`, `--statement-timeout-ms`, `--query-timeout-ms`, `--lock-timeout-ms`, `--idle-in-transaction-session-timeout-ms`, `maxConnections`, `idleTimeoutMillis`, `connectionTimeoutMillis`, `statementTimeoutMs`, `queryTimeoutMs`, `lockTimeoutMs`, `idleInTransactionSessionTimeoutMs`, `POSTGRES_MCP_MAX_CONNECTIONS`, `POSTGRES_MCP_IDLE_TIMEOUT_MS`, `POSTGRES_MCP_CONNECTION_TIMEOUT_MS`, `POSTGRES_MCP_STATEMENT_TIMEOUT_MS`, `POSTGRES_MCP_QUERY_TIMEOUT_MS`, `POSTGRES_MCP_LOCK_TIMEOUT_MS`, or `POSTGRES_MCP_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS`.
+Explicit connection string, `workspaceDir`, `auditFile`, `--workspace-dir`, and `--audit-file` values must be non-empty strings.
+Connection target allowlists are enforced before tool execution for per-tool connection strings and during connection resolution for server-level sources. When an allowlist is configured, connection strings must be PostgreSQL URL or keyword-style strings with an explicit `host` or `hostaddr`.
+
+Mutation, index, export, and copy filters should use structured `where` predicates. Legacy string `where` clauses are rejected; the explicit `rawWhere` escape hatch is treated as arbitrary SQL and requires `--security-mode unsafe --allow-destructive`.
+
+EXPLAIN tools only accept one read-only statement and run inside a read-only transaction. `analyze: true` still requires unsafe mode because PostgreSQL executes the supplied query to collect runtime statistics.
+
+Multi-statement `pg_execute_sql` calls must use `transactional: true`, `expectRows: false`, and no bind `parameters`. Use a single parameterized statement or CTE when bind parameters are needed.
+
+Error messages, diagnostics, and catalog metadata are sanitized by default. SQL text from `pg_stat_statements`, function definitions, RLS predicates, check constraints, index definitions, and column defaults are redacted unless they are intentionally returned as user data.
+Data execution, query/performance, schema, index, constraint, user/permission, trigger, comment, function, RLS, migration, and diagnostic tools reject unknown input fields so misspelled or unintended parameters fail before connection resolution.
+
+Denied security-boundary requests emit one structured stderr line prefixed with `[MCP Audit]`. Audit events include sanitized fields such as `toolName`, `reason`, `securityMode`, `risk`, and whether per-tool connection strings were present; they do not log raw SQL, full request payloads, or connection-string passwords. Set `POSTGRES_MCP_AUDIT_FILE`, `--audit-file`, or `auditFile` to append the same sanitized audit events to a JSONL file.
+
+Filesystem tools such as table export/import require a workspace directory and only read or write `.json` and `.csv` files inside it:
+
+```bash
+npx @henkey/postgres-mcp-server \
+  --security-mode admin \
+  --allow-destructive \
+  --workspace-dir /path/to/mcp-workspace \
+  --connection-string "postgresql://admin_user:pass@host:5432/db"
+```
+
 ## What's Included
 
-**17 powerful tools** organized into three categories:
+**18 powerful tools** organized into three categories:
 - **🔄 Consolidation**: 34 original tools consolidated into 8 intelligent meta-tools
-- **🔧 Specialized**: 5 tools kept separate for complex operations  
+- **🔧 Specialized**: 6 tools kept separate for complex operations
 - **🆕 Enhancement**: 4 brand new tools (not in original 46)
 
 ### 📊 **Consolidated Meta-Tools** (8 tools)
@@ -130,10 +261,11 @@ Add to your MCP client configuration:
 - **Execute SQL** - Arbitrary SQL execution with transaction support
 - **Comments Management** - Comprehensive comment management for all database objects
 
-### 🔧 **Specialized Tools** (5 tools)
+### 🔧 **Specialized Tools** (6 tools)
 - **Database Analysis** - Performance and configuration analysis
 - **Debug Database** - Troubleshoot connection, performance, locks
-- **Data Export/Import** - JSON/CSV data migration
+- **Data Export** - JSON/CSV data export
+- **Data Import** - JSON/CSV data import
 - **Copy Between Databases** - Cross-database data transfer  
 - **Real-time Monitoring** - Live database metrics and alerts
 
@@ -141,7 +273,7 @@ Add to your MCP client configuration:
 
 ```typescript
 // Analyze database performance
-{ "analysisType": "performance" }
+{ "analysisType": "performance", "schema": "public" }
 
 // Create a table with constraints
 {
@@ -160,14 +292,17 @@ Add to your MCP client configuration:
   "parameters": ["2024-01-01"],
   "limit": 100
 }
+// Select results are always bounded: default limit 100, max 1000.
 
 // Insert new data
 {
   "operation": "insert",
   "table": "users",
   "data": {"name": "John Doe", "email": "john@example.com"},
-  "returning": "*"
+  "returning": "*",
+  "maxReturningRows": 100
 }
+// Mutation RETURNING output is capped in the response: default 100, max 1000.
 
 // Find slow queries
 {
@@ -188,7 +323,17 @@ Add to your MCP client configuration:
   "operation": "insert",
   "table": "products",
   "data": {"name": "New Product", "price": 99.99},
-  "returning": "id"
+  "returning": "id",
+  "maxReturningRows": 100
+}
+
+// Perform an UPDATE mutation with a structured WHERE predicate
+{
+  "operation": "update",
+  "table": "products",
+  "data": {"price": 89.99},
+  "where": {"id": 123},
+  "returning": ["id", "price"]
 }
 
 // Manage database object comments
@@ -206,10 +351,12 @@ Add to your MCP client configuration:
 
 For additional information, see the [`docs/`](./docs/) folder:
 
-- **[📖 Usage Guide](./docs/USAGE.md)** - Comprehensive tool usage and examples
-- **[🛠️ Development Guide](./docs/DEVELOPMENT.md)** - Setup and contribution guide  
-- **[⚙️ Technical Details](./docs/TECHNICAL.md)** - Architecture and implementation
-- **[👨‍💻 Developer Reference](./docs/DEVELOPER.md)** - API reference and advanced usage
+- **[🔐 Security Posture](./SECURITY.md)** - Sandboxing, approvals, audit events, and deployment posture
+- **[PostgreSQL Role Templates](./docs/POSTGRES_ROLES.md)** - Least-privilege database roles for each deployment profile
+- **[📖 Usage Guide](./docs/USAGE.md)** - Hardened usage patterns and examples
+- **[🛠️ Development Guide](./docs/DEVELOPMENT.md)** - Setup and release checklist
+- **[⚙️ Technical Details](./docs/TECHNICAL.md)** - Security architecture and implementation constraints
+- **[👨‍💻 Developer Reference](./docs/DEVELOPER.md)** - Contribution rules for tool and policy changes
 - **[📋 Documentation Index](./docs/INDEX.md)** - Complete documentation overview
 
 ## Features Highlights
@@ -221,17 +368,17 @@ For additional information, see the [`docs/`](./docs/) folder:
 
 ### **🆕 Enhanced Data Capabilities** 
 ✅ **Complete CRUD operations** - INSERT/UPDATE/DELETE/UPSERT with parameterized queries  
-✅ **Flexible querying** - SELECT with count/exists support and safety limits
+✅ **Flexible querying** - SELECT with count/exists support and bounded safety limits
 ✅ **Arbitrary SQL execution** - Transaction support for complex operations
 
 ### **🔧 Production Ready**
-✅ **Flexible connection** - CLI args, env vars, or per-tool configuration  
-✅ **Security focused** - SQL injection prevention, parameterized queries  
+✅ **Controlled connection** - CLI args or env vars by default; per-tool connection strings require opt-in
+✅ **Security focused** - Read-only default mode, centralized policy checks, structured mutation predicates
 ✅ **Robust architecture** - Connection pooling, comprehensive error handling
 
 ## Docker Usage
 
-The PostgreSQL MCP Server is fully Docker-compatible and can be used in production environments.
+The PostgreSQL MCP Server is fully Docker-compatible and can be used in production environments. The image uses a multi-stage build, installs only production dependencies in the runtime stage, and runs as the non-root `node` user.
 
 ### Building the Image
 ```bash
@@ -297,9 +444,9 @@ For use with MCP clients like Cursor or Claude Desktop:
         "run",
         "-i",
         "--rm",
-        "henkey/postgres-mcp:latest",
         "-e",
-        "POSTGRES_CONNECTION_STRING"
+        "POSTGRES_CONNECTION_STRING",
+        "henkey/postgres-mcp:latest"
       ],
       "env": {
         "POSTGRES_CONNECTION_STRING": "postgresql://user:password@host:port/database"

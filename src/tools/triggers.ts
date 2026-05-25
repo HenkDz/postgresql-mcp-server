@@ -1,7 +1,8 @@
-import { DatabaseConnection } from '../utils/connection.js';
+import { DatabaseConnection, sanitizeErrorMessage } from '../utils/connection.js';
 import { z } from 'zod';
 import type { PostgresTool, GetConnectionStringFn, ToolOutput } from '../types/tool.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+import { quoteIdent, quoteQualifiedIdent, redactSqlText } from '../utils/sql.js';
 
 interface TriggerResult {
   success: boolean;
@@ -18,6 +19,17 @@ interface TriggerInfo {
   definition: string;
   function: string;
   enabled: boolean;
+}
+
+function redactTriggerInfo(trigger: TriggerInfo): TriggerInfo {
+  return {
+    ...trigger,
+    definition: redactSqlText(trigger.definition)
+  };
+}
+
+function formatValidationError(error: z.ZodError): string {
+  return error.errors.map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`).join(', ');
 }
 
 /**
@@ -76,7 +88,7 @@ export async function getTriggers(  connectionString: string,  tableName?: strin
     
     query += ' ORDER BY c.relname, t.tgname';
     
-    const triggers = await db.query<TriggerInfo>(query, params);
+    const triggers = (await db.query<TriggerInfo>(query, params)).map(redactTriggerInfo);
     
     return {
       success: true,
@@ -88,7 +100,7 @@ export async function getTriggers(  connectionString: string,  tableName?: strin
   } catch (error) {
     return {
       success: false,
-      message: `Failed to get trigger information: ${error instanceof Error ? error.message : String(error)}`,
+      message: `Failed to get trigger information: ${sanitizeErrorMessage(error)}`,
       details: null
     };
   } finally {
@@ -116,19 +128,19 @@ export async function createTrigger(
   const db = DatabaseConnection.getInstance();
   
   try {
-    await db.connect(connectionString);
-    
     const schema = options.schema || 'public';
     const timing = options.timing || 'AFTER';
     const events = options.events || ['INSERT'];
     const forEach = options.forEach || 'ROW';
     const createOrReplace = options.replace ? 'CREATE OR REPLACE' : 'CREATE';
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
+    const qualifiedFunctionName = quoteQualifiedIdent(functionName, schema);
     
     // Build trigger creation SQL
     let sql = `
-      ${createOrReplace} TRIGGER ${triggerName}
+      ${createOrReplace} TRIGGER ${quoteIdent(triggerName)}
       ${timing} ${events.join(' OR ')}
-      ON ${schema}.${tableName}
+      ON ${qualifiedTableName}
     `;
     
     // Add FOR EACH clause
@@ -142,8 +154,9 @@ export async function createTrigger(
     }
     
     // Add EXECUTE PROCEDURE clause
-    sql += ` EXECUTE FUNCTION ${functionName}()`;
+    sql += ` EXECUTE FUNCTION ${qualifiedFunctionName}()`;
     
+    await db.connect(connectionString);
     await db.query(sql);
     
     return {
@@ -161,7 +174,7 @@ export async function createTrigger(
   } catch (error) {
     return {
       success: false,
-      message: `Failed to create trigger: ${error instanceof Error ? error.message : String(error)}`,
+      message: `Failed to create trigger: ${sanitizeErrorMessage(error)}`,
       details: null
     };
   } finally {
@@ -185,20 +198,20 @@ export async function dropTrigger(
   const db = DatabaseConnection.getInstance();
   
   try {
-    await db.connect(connectionString);
-    
     const schema = options.schema || 'public';
     const ifExists = options.ifExists ? 'IF EXISTS' : '';
     const cascade = options.cascade ? 'CASCADE' : '';
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
     
     // Build trigger drop SQL
-    let sql = `DROP TRIGGER ${ifExists} ${triggerName} ON ${schema}.${tableName}`;
+    let sql = `DROP TRIGGER ${ifExists} ${quoteIdent(triggerName)} ON ${qualifiedTableName}`;
     
     // Add cascade if specified
     if (cascade) {
       sql += ` ${cascade}`;
     }
     
+    await db.connect(connectionString);
     await db.query(sql);
     
     return {
@@ -213,7 +226,7 @@ export async function dropTrigger(
   } catch (error) {
     return {
       success: false,
-      message: `Failed to drop trigger: ${error instanceof Error ? error.message : String(error)}`,
+      message: `Failed to drop trigger: ${sanitizeErrorMessage(error)}`,
       details: null
     };
   } finally {
@@ -236,14 +249,14 @@ export async function setTriggerState(
   const db = DatabaseConnection.getInstance();
   
   try {
-    await db.connect(connectionString);
-    
     const schema = options.schema || 'public';
     const action = enable ? 'ENABLE' : 'DISABLE';
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
     
     // Build trigger alter SQL
-    const sql = `ALTER TABLE ${schema}.${tableName} ${action} TRIGGER ${triggerName}`;
+    const sql = `ALTER TABLE ${qualifiedTableName} ${action} TRIGGER ${quoteIdent(triggerName)}`;
     
+    await db.connect(connectionString);
     await db.query(sql);
     
     return {
@@ -259,7 +272,7 @@ export async function setTriggerState(
   } catch (error) {
     return {
       success: false,
-      message: `Failed to ${enable ? 'enable' : 'disable'} trigger: ${error instanceof Error ? error.message : String(error)}`,
+      message: `Failed to ${enable ? 'enable' : 'disable'} trigger: ${sanitizeErrorMessage(error)}`,
       details: null
     };
   } finally {
@@ -272,7 +285,7 @@ const GetTriggersInputSchema = z.object({
   connectionString: z.string().optional(),
   tableName: z.string().optional(),
   schema: z.string().optional().default('public'),
-});
+}).strict();
 type GetTriggersInput = z.infer<typeof GetTriggersInputSchema>;
 
 async function executeGetTriggers(  input: GetTriggersInput,  getConnectionString: GetConnectionStringFn): Promise<TriggerInfo[]> {  const resolvedConnectionString = getConnectionString(input.connectionString);  const db = DatabaseConnection.getInstance();  const { tableName, schema } = input;    try {    await db.connect(resolvedConnectionString);        let query = `
@@ -323,9 +336,9 @@ async function executeGetTriggers(  input: GetTriggersInput,  getConnectionStrin
     query += ' ORDER BY c.relname, t.tgname';
     
     const triggers = await db.query<TriggerInfo>(query, params);
-    return triggers;
+    return triggers.map(redactTriggerInfo);
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to get trigger information: ${error instanceof Error ? error.message : String(error)}`);
+    throw new McpError(ErrorCode.InternalError, `Failed to get trigger information: ${sanitizeErrorMessage(error)}`);
   } finally {
     await db.disconnect();
   }
@@ -338,7 +351,7 @@ export const getTriggersTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = GetTriggersInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const triggers = await executeGetTriggers(validationResult.data, getConnectionString);
@@ -348,7 +361,7 @@ export const getTriggersTool: PostgresTool = {
         : `Found ${triggers.length} triggers in schema ${schema}`;
       return { content: [{ type: 'text', text: message }, { type: 'text', text: JSON.stringify(triggers, null, 2) }] };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error getting triggers: ${errorMessage}` }], isError: true };
     }
   }
@@ -366,26 +379,23 @@ const CreateTriggerInputSchema = z.object({
   when: z.string().optional(),
   forEach: z.enum(['ROW', 'STATEMENT']).optional().default('ROW'),
   replace: z.boolean().optional().default(false),
-});
+}).strict();
 type CreateTriggerInput = z.infer<typeof CreateTriggerInputSchema>;
 
 async function executeCreateTrigger(
   input: CreateTriggerInput,
   getConnectionString: GetConnectionStringFn
 ): Promise<{ name: string; table: string; schema: string; timing: string; events: string[]; function: string }> {
-  const resolvedConnectionString = getConnectionString(input.connectionString);
   const db = DatabaseConnection.getInstance();
   const { triggerName, tableName, functionName, schema, timing, events, when, forEach, replace } = input;
   
   try {
-    await db.connect(resolvedConnectionString);
-    
     const createOrReplace = replace ? 'CREATE OR REPLACE' : 'CREATE';
-    const qualifiedTableName = `"${schema}"."${tableName}"`;
-    const qualifiedFunctionName = `"${functionName}"`; // Assuming functionName might also need quoting or schema qualification
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
+    const qualifiedFunctionName = quoteQualifiedIdent(functionName, schema);
 
     let sql = `
-      ${createOrReplace} TRIGGER "${triggerName}"
+      ${createOrReplace} TRIGGER ${quoteIdent(triggerName)}
       ${timing} ${events.join(' OR ')}
       ON ${qualifiedTableName}
     `;
@@ -398,8 +408,10 @@ async function executeCreateTrigger(
       sql += ` WHEN (${when})`;
     }
     
-    sql += ` EXECUTE FUNCTION ${qualifiedFunctionName}()`; // Ensure function has () if it's a procedure/function call
+    sql += ` EXECUTE FUNCTION ${qualifiedFunctionName}()`;
+    const resolvedConnectionString = getConnectionString(input.connectionString);
     
+    await db.connect(resolvedConnectionString);
     await db.query(sql);
     
     return {
@@ -411,7 +423,7 @@ async function executeCreateTrigger(
       function: functionName
     };
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to create trigger: ${error instanceof Error ? error.message : String(error)}`);
+    throw new McpError(ErrorCode.InternalError, `Failed to create trigger: ${sanitizeErrorMessage(error)}`);
   } finally {
     await db.disconnect();
   }
@@ -424,13 +436,13 @@ export const createTriggerTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = CreateTriggerInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const result = await executeCreateTrigger(validationResult.data, getConnectionString);
       return { content: [{ type: 'text', text: `Trigger ${result.name} created successfully on ${result.schema}.${result.table}` }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error creating trigger: ${errorMessage}` }], isError: true };
     }
   }
@@ -444,34 +456,33 @@ const DropTriggerInputSchema = z.object({
   schema: z.string().optional().default('public'),
   ifExists: z.boolean().optional().default(false),
   cascade: z.boolean().optional().default(false),
-});
+}).strict();
 type DropTriggerInput = z.infer<typeof DropTriggerInputSchema>;
 
 async function executeDropTrigger(
   input: DropTriggerInput,
   getConnectionString: GetConnectionStringFn
 ): Promise<{ name: string; table: string; schema: string }> {
-  const resolvedConnectionString = getConnectionString(input.connectionString);
   const db = DatabaseConnection.getInstance();
   const { triggerName, tableName, schema, ifExists, cascade } = input;
 
   try {
-    await db.connect(resolvedConnectionString);
-    
     const ifExistsClause = ifExists ? 'IF EXISTS' : '';
     const cascadeClause = cascade ? 'CASCADE' : '';
-    const qualifiedTableName = `"${schema}"."${tableName}"`;
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
     
-    let sql = `DROP TRIGGER ${ifExistsClause} "${triggerName}" ON ${qualifiedTableName}`;
+    let sql = `DROP TRIGGER ${ifExistsClause} ${quoteIdent(triggerName)} ON ${qualifiedTableName}`;
     if (cascadeClause) {
       sql += ` ${cascadeClause}`;
     }
+    const resolvedConnectionString = getConnectionString(input.connectionString);
     
+    await db.connect(resolvedConnectionString);
     await db.query(sql);
     
     return { name: triggerName, table: tableName, schema };
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to drop trigger: ${error instanceof Error ? error.message : String(error)}`);
+    throw new McpError(ErrorCode.InternalError, `Failed to drop trigger: ${sanitizeErrorMessage(error)}`);
   } finally {
     await db.disconnect();
   }
@@ -484,13 +495,13 @@ export const dropTriggerTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = DropTriggerInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const result = await executeDropTrigger(validationResult.data, getConnectionString);
       return { content: [{ type: 'text', text: `Trigger ${result.name} dropped successfully from ${result.schema}.${result.table}` }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error dropping trigger: ${errorMessage}` }], isError: true };
     }
   }
@@ -503,30 +514,29 @@ const SetTriggerStateInputSchema = z.object({
   tableName: z.string(),
   enable: z.boolean(),
   schema: z.string().optional().default('public'),
-});
+}).strict();
 type SetTriggerStateInput = z.infer<typeof SetTriggerStateInputSchema>;
 
 async function executeSetTriggerState(
   input: SetTriggerStateInput,
   getConnectionString: GetConnectionStringFn
 ): Promise<{ name: string; table: string; schema: string; enabled: boolean }> {
-  const resolvedConnectionString = getConnectionString(input.connectionString);
   const db = DatabaseConnection.getInstance();
   const { triggerName, tableName, enable, schema } = input;
   
   try {
-    await db.connect(resolvedConnectionString);
-    
     const action = enable ? 'ENABLE' : 'DISABLE';
-    const qualifiedTableName = `"${schema}"."${tableName}"`;
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
         
-    const sql = `ALTER TABLE ${qualifiedTableName} ${action} TRIGGER "${triggerName}"`;
+    const sql = `ALTER TABLE ${qualifiedTableName} ${action} TRIGGER ${quoteIdent(triggerName)}`;
+    const resolvedConnectionString = getConnectionString(input.connectionString);
     
+    await db.connect(resolvedConnectionString);
     await db.query(sql);
     
     return { name: triggerName, table: tableName, schema, enabled: enable };
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to set trigger state: ${error instanceof Error ? error.message : String(error)}`);
+    throw new McpError(ErrorCode.InternalError, `Failed to set trigger state: ${sanitizeErrorMessage(error)}`);
   } finally {
     await db.disconnect();
   }
@@ -539,51 +549,57 @@ export const setTriggerStateTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = SetTriggerStateInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const result = await executeSetTriggerState(validationResult.data, getConnectionString);
       return { content: [{ type: 'text', text: `Trigger ${result.name} ${result.enabled ? 'enabled' : 'disabled'} on ${result.schema}.${result.table}` }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error setting trigger state: ${errorMessage}` }], isError: true };
     }
   }
 };
 
+const ManageTriggersInputSchema = z.object({
+  connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
+  operation: z.enum(['get', 'create', 'drop', 'set_state']).describe('Operation: get (list triggers), create (new trigger), drop (remove trigger), set_state (enable/disable trigger)'),
+
+  // Common parameters
+  schema: z.string().optional().describe('Schema name (defaults to public)'),
+  tableName: z.string().optional().describe('Table name (optional filter for get, required for create/drop/set_state)'),
+
+  // Trigger identification (for create/drop/set_state)
+  triggerName: z.string().optional().describe('Trigger name (required for create/drop/set_state)'),
+
+  // Create trigger parameters
+  functionName: z.string().optional().describe('Function name (required for create operation)'),
+  timing: z.enum(['BEFORE', 'AFTER', 'INSTEAD OF']).optional().describe('Trigger timing (for create operation, defaults to AFTER)'),
+  events: z.array(z.enum(['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE'])).min(1).optional().describe('Trigger events (for create operation, defaults to ["INSERT"])'),
+  forEach: z.enum(['ROW', 'STATEMENT']).optional().describe('FOR EACH ROW or STATEMENT (for create operation, defaults to ROW)'),
+  when: z.string().optional().describe('WHEN clause condition (for create operation)'),
+  replace: z.boolean().optional().describe('Whether to replace trigger if exists (for create operation)'),
+
+  // Drop trigger parameters
+  ifExists: z.boolean().optional().describe('Include IF EXISTS clause (for drop operation)'),
+  cascade: z.boolean().optional().describe('Include CASCADE clause (for drop operation)'),
+
+  // Set state parameters
+  enable: z.boolean().optional().describe('Whether to enable the trigger (required for set_state operation)')
+}).strict();
+
 // Complete Consolidated Trigger Management Tool (covers all 4 operations)
 export const manageTriggersTools: PostgresTool = {
   name: 'pg_manage_triggers',
   description: 'Manage PostgreSQL triggers - get, create, drop, and enable/disable triggers. Examples: operation="get" to list triggers, operation="create" with triggerName, tableName, functionName, operation="drop" with triggerName and tableName, operation="set_state" with triggerName, tableName, enable',
-  inputSchema: z.object({
-    connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
-    operation: z.enum(['get', 'create', 'drop', 'set_state']).describe('Operation: get (list triggers), create (new trigger), drop (remove trigger), set_state (enable/disable trigger)'),
-    
-    // Common parameters
-    schema: z.string().optional().describe('Schema name (defaults to public)'),
-    tableName: z.string().optional().describe('Table name (optional filter for get, required for create/drop/set_state)'),
-    
-    // Trigger identification (for create/drop/set_state)
-    triggerName: z.string().optional().describe('Trigger name (required for create/drop/set_state)'),
-    
-    // Create trigger parameters
-    functionName: z.string().optional().describe('Function name (required for create operation)'),
-    timing: z.enum(['BEFORE', 'AFTER', 'INSTEAD OF']).optional().describe('Trigger timing (for create operation, defaults to AFTER)'),
-    events: z.array(z.enum(['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE'])).optional().describe('Trigger events (for create operation, defaults to ["INSERT"])'),
-    forEach: z.enum(['ROW', 'STATEMENT']).optional().describe('FOR EACH ROW or STATEMENT (for create operation, defaults to ROW)'),
-    when: z.string().optional().describe('WHEN clause condition (for create operation)'),
-    replace: z.boolean().optional().describe('Whether to replace trigger if exists (for create operation)'),
-    
-    // Drop trigger parameters
-    ifExists: z.boolean().optional().describe('Include IF EXISTS clause (for drop operation)'),
-    cascade: z.boolean().optional().describe('Include CASCADE clause (for drop operation)'),
-    
-    // Set state parameters
-    enable: z.boolean().optional().describe('Whether to enable the trigger (required for set_state operation)')
-  }),
-  // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-  execute: async (args: any, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
-    const { 
+  inputSchema: ManageTriggersInputSchema,
+  execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
+    const validationResult = ManageTriggersInputSchema.safeParse(args);
+    if (!validationResult.success) {
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
+    }
+
+    const {
       connectionString: connStringArg,
       operation,
       schema,
@@ -598,22 +614,7 @@ export const manageTriggersTools: PostgresTool = {
       ifExists,
       cascade,
       enable
-    } = args as {
-      connectionString?: string;
-      operation: 'get' | 'create' | 'drop' | 'set_state';
-      schema?: string;
-      tableName?: string;
-      triggerName?: string;
-      functionName?: string;
-      timing?: 'BEFORE' | 'AFTER' | 'INSTEAD OF';
-      events?: ('INSERT' | 'UPDATE' | 'DELETE' | 'TRUNCATE')[];
-      forEach?: 'ROW' | 'STATEMENT';
-      when?: string;
-      replace?: boolean;
-      ifExists?: boolean;
-      cascade?: boolean;
-      enable?: boolean;
-    };
+    } = validationResult.data;
 
     try {
       switch (operation) {
@@ -694,10 +695,8 @@ export const manageTriggersTools: PostgresTool = {
       }
 
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error executing ${operation} operation: ${errorMessage}` }], isError: true };
     }
   }
 };
-
- 

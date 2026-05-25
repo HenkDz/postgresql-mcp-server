@@ -1,342 +1,119 @@
-# PostgreSQL MCP Server - Developer Guide
+# PostgreSQL MCP Server Developer Guide
 
-This guide provides examples and best practices for using the PostgreSQL MCP server in your applications.
+This guide is for contributors changing the server. For end-user tool parameters, use [TOOL_SCHEMAS.md](../TOOL_SCHEMAS.md).
 
-## Getting Started
+## Local Setup
 
-### Installation
-
-1. Install the server:
-   ```bash
-   npm install
-   npm run build
-   ```
-
-2. Test the server:
-   ```bash
-   # On Unix/Linux/macOS
-   ./test-client.js get_schema_info '{"connectionString":"postgresql://user:password@localhost:5432/dbname"}'
-   
-   # On Windows
-   node test-client.js get_schema_info '{"connectionString":"postgresql://user:password@localhost:5432/dbname"}'
-   ```
-
-### Connection Strings
-
-PostgreSQL connection strings follow this format:
-```
-postgresql://[user[:password]@][host][:port][/dbname][?param1=value1&...]
+```bash
+npm install
+npm run build
+npm run test:run
 ```
 
-Examples:
-- `postgresql://postgres:password@localhost:5432/mydb`
-- `postgresql://postgres@localhost/mydb`
-- `postgresql://postgres:password@localhost/mydb?sslmode=require`
+The deterministic test command is:
 
-## Tool Examples
-
-### Schema Management
-
-#### Get Schema Information
-
-List all tables in a database:
-```javascript
-{
-  "name": "get_schema_info",
-  "arguments": {
-    "connectionString": "postgresql://postgres:password@localhost:5432/mydb"
-  }
-}
+```bash
+npx vitest run --pool=threads --maxWorkers=1 --minWorkers=1
 ```
 
-Get detailed information about a specific table:
-```javascript
-{
-  "name": "get_schema_info",
-  "arguments": {
-    "connectionString": "postgresql://postgres:password@localhost:5432/mydb",
-    "tableName": "users"
-  }
-}
+Use the same command before publishing or making security-sensitive changes.
+
+## Current Project Shape
+
+```text
+src/
+  index.ts              MCP server, CLI/config loading, security policy enforcement
+  server/boundary.ts    request boundary helpers for connection string handling
+  security/policy.ts    centralized tool-call risk classification
+  tools/                individual MCP tools and focused unit tests
+  types/tool.ts         shared tool types
+  utils/connection.ts   PostgreSQL pool wrapper, timeouts, error sanitization
+  utils/filesystem.ts   workspace path and file-size sandbox helpers
+  utils/sql.ts          identifier quoting, predicates, redaction, read-only validation
 ```
 
-#### Create a Table
+The public runtime is built into `build/`. Source tests live beside implementation files as `*.test.ts`.
 
-Create a new users table:
-```javascript
-{
-  "name": "create_table",
-  "arguments": {
-    "connectionString": "postgresql://postgres:password@localhost:5432/mydb",
-    "tableName": "users",
-    "columns": [
-      { "name": "id", "type": "SERIAL", "nullable": false },
-      { "name": "username", "type": "VARCHAR(100)", "nullable": false },
-      { "name": "email", "type": "VARCHAR(255)", "nullable": false },
-      { "name": "created_at", "type": "TIMESTAMP", "default": "NOW()" }
-    ]
-  }
-}
-```
+## Security Rules For New Work
 
-#### Alter a Table
+Start with the security boundary, not the SQL string.
 
-Add, modify, and drop columns:
-```javascript
-{
-  "name": "alter_table",
-  "arguments": {
-    "connectionString": "postgresql://postgres:password@localhost:5432/mydb",
-    "tableName": "users",
-    "operations": [
-      { "type": "add", "columnName": "last_login", "dataType": "TIMESTAMP" },
-      { "type": "alter", "columnName": "email", "nullable": false },
-      { "type": "drop", "columnName": "temporary_field" }
-    ]
-  }
-}
-```
+- Add every new tool or new operation to `src/security/policy.ts`.
+- Default new functionality to `read` or the narrowest applicable risk.
+- Treat arbitrary SQL fragments, executable database code, column defaults, RLS predicates, CHECK expressions, trigger `WHEN` expressions, and raw filters as `arbitrary_sql`.
+- Require explicit structured inputs whenever possible.
+- Quote identifiers with `quoteIdent` or `quoteQualifiedIdent`.
+- Parameterize values. Do not interpolate untrusted values into SQL.
+- Use `buildWhereClause` for DML predicates and `buildStaticWhereClause` only where PostgreSQL syntax does not allow bind parameters.
+- Reject legacy string predicates unless the field is explicitly named `rawWhere`.
+- Sanitize returned errors with `sanitizeErrorMessage`.
+- Redact catalog SQL text with `redactSqlText` unless returning user data is the purpose of the tool.
+- Keep filesystem reads/writes inside `POSTGRES_MCP_WORKSPACE_DIR` or `--workspace-dir`.
 
-### Data Migration
+## Adding A Tool Or Operation
 
-#### Export Table Data
+1. Define a strict Zod schema near the tool implementation.
+2. Validate input before resolving a connection string.
+3. Add policy classification tests in `src/security/policy.test.ts`.
+4. Add focused tool tests for SQL construction, policy-sensitive input rejection, redaction, and error sanitization.
+5. Update [TOOL_SCHEMAS.md](../TOOL_SCHEMAS.md) and user-facing docs.
+6. Run `npm run prepublishOnly` and `git diff --check`.
 
-Export to JSON:
-```javascript
-{
-  "name": "export_table_data",
-  "arguments": {
-    "connectionString": "postgresql://postgres:password@localhost:5432/mydb",
-    "tableName": "users",
-    "outputPath": "./exports/users.json",
-    "where": "created_at > '2023-01-01'",
-    "limit": 1000
-  }
-}
-```
+Minimal tool pattern:
 
-Export to CSV:
-```javascript
-{
-  "name": "export_table_data",
-  "arguments": {
-    "connectionString": "postgresql://postgres:password@localhost:5432/mydb",
-    "tableName": "users",
-    "outputPath": "./exports/users.csv",
-    "format": "csv"
-  }
-}
-```
+```ts
+const InputSchema = z.object({
+  operation: z.enum(['get']),
+  schema: z.string().optional().default('public')
+});
 
-#### Import Table Data
+export const exampleTool: PostgresTool = {
+  name: 'pg_example',
+  description: 'Example read-only tool',
+  inputSchema: InputSchema,
+  async execute(args, getConnectionString) {
+    const parsed = InputSchema.safeParse(args);
+    if (!parsed.success) {
+      return { content: [{ type: 'text', text: `Invalid input: ${parsed.error.message}` }], isError: true };
+    }
 
-Import from JSON:
-```javascript
-{
-  "name": "import_table_data",
-  "arguments": {
-    "connectionString": "postgresql://postgres:password@localhost:5432/mydb",
-    "tableName": "users",
-    "inputPath": "./imports/users.json",
-    "truncateFirst": true
-  }
-}
-```
+    const db = DatabaseConnection.getInstance();
 
-Import from CSV:
-```javascript
-{
-  "name": "import_table_data",
-  "arguments": {
-    "connectionString": "postgresql://postgres:password@localhost:5432/mydb",
-    "tableName": "users",
-    "inputPath": "./imports/users.csv",
-    "format": "csv",
-    "delimiter": ","
-  }
-}
-```
-
-#### Copy Between Databases
-
-Copy data between databases:
-```javascript
-{
-  "name": "copy_between_databases",
-  "arguments": {
-    "sourceConnectionString": "postgresql://postgres:password@localhost:5432/source_db",
-    "targetConnectionString": "postgresql://postgres:password@localhost:5432/target_db",
-    "tableName": "users",
-    "where": "active = true",
-    "truncateTarget": false
-  }
-}
-```
-
-### Database Monitoring
-
-#### Monitor Database
-
-Basic monitoring:
-```javascript
-{
-  "name": "monitor_database",
-  "arguments": {
-    "connectionString": "postgresql://postgres:password@localhost:5432/mydb"
-  }
-}
-```
-
-Advanced monitoring with alerts:
-```javascript
-{
-  "name": "monitor_database",
-  "arguments": {
-    "connectionString": "postgresql://postgres:password@localhost:5432/mydb",
-    "includeTables": true,
-    "includeQueries": true,
-    "includeLocks": true,
-    "includeReplication": true,
-    "alertThresholds": {
-      "connectionPercentage": 80,
-      "longRunningQuerySeconds": 30,
-      "cacheHitRatio": 0.95,
-      "deadTuplesPercentage": 10,
-      "vacuumAge": 7
+    try {
+      await db.connect(getConnectionString(undefined));
+      const rows = await db.query('SELECT 1 AS ok');
+      return { content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: sanitizeErrorMessage(error) }], isError: true };
+    } finally {
+      await db.disconnect();
     }
   }
-}
+};
 ```
 
-### Database Analysis and Debugging
+## Testing Expectations
 
-#### Analyze Database
+Use small unit tests with mocked `DatabaseConnection` for most behavior. Security-sensitive tests should prove both the generated SQL and that rejected input does not call `connect` or `query`.
 
-Analyze configuration:
-```javascript
-{
-  "name": "analyze_database",
-  "arguments": {
-    "connectionString": "postgresql://postgres:password@localhost:5432/mydb",
-    "analysisType": "configuration"
-  }
-}
+Cover these cases when relevant:
+
+- invalid identifiers
+- structured predicate SQL and values
+- rejection of legacy raw strings
+- output caps
+- timeout propagation
+- redaction of database errors and catalog SQL
+- policy classification and denial behavior
+
+## Release Checklist
+
+Before publishing:
+
+```bash
+npm run prepublishOnly
+git diff --check
+npm pack --dry-run
 ```
 
-Analyze performance:
-```javascript
-{
-  "name": "analyze_database",
-  "arguments": {
-    "connectionString": "postgresql://postgres:password@localhost:5432/mydb",
-    "analysisType": "performance"
-  }
-}
-```
-
-Analyze security:
-```javascript
-{
-  "name": "analyze_database",
-  "arguments": {
-    "connectionString": "postgresql://postgres:password@localhost:5432/mydb",
-    "analysisType": "security"
-  }
-}
-```
-
-#### Debug Database Issues
-
-Debug connection issues:
-```javascript
-{
-  "name": "debug_database",
-  "arguments": {
-    "connectionString": "postgresql://postgres:password@localhost:5432/mydb",
-    "issue": "connection",
-    "logLevel": "debug"
-  }
-}
-```
-
-Debug performance issues:
-```javascript
-{
-  "name": "debug_database",
-  "arguments": {
-    "connectionString": "postgresql://postgres:password@localhost:5432/mydb",
-    "issue": "performance",
-    "logLevel": "debug"
-  }
-}
-```
-
-Debug lock issues:
-```javascript
-{
-  "name": "debug_database",
-  "arguments": {
-    "connectionString": "postgresql://postgres:password@localhost:5432/mydb",
-    "issue": "locks",
-    "logLevel": "debug"
-  }
-}
-```
-
-Debug replication issues:
-```javascript
-{
-  "name": "debug_database",
-  "arguments": {
-    "connectionString": "postgresql://postgres:password@localhost:5432/mydb",
-    "issue": "replication",
-    "logLevel": "debug"
-  }
-}
-```
-
-
-
-## Best Practices
-
-1. **Connection Pooling**: The server implements connection pooling internally, but you should still close connections when done.
-
-2. **Error Handling**: Always check the `success` field in responses and handle errors appropriately.
-
-3. **Security**: 
-   - Never hardcode connection strings with passwords in your code
-   - Use environment variables or secure vaults for credentials
-   - Use SSL connections in production environments
-
-4. **Performance**:
-   - Limit the amount of data returned by using WHERE clauses and LIMIT
-   - For large data exports/imports, consider using batching
-   - Monitor query performance regularly
-
-5. **Monitoring**:
-   - Set up regular monitoring to catch issues early
-   - Configure appropriate alert thresholds based on your application needs
-   - Pay special attention to connection usage and cache hit ratio
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Connection Errors**:
-   - Check that the PostgreSQL server is running
-   - Verify connection string parameters
-   - Ensure network connectivity between the MCP server and PostgreSQL
-
-2. **Permission Errors**:
-   - Verify that the user has appropriate permissions for the requested operations
-   - Check schema and table permissions
-
-3. **Performance Issues**:
-   - Use the `analyze_database` and `debug_database` tools to identify bottlenecks
-   - Check for long-running queries
-   - Verify proper indexing on tables
-
-4. **Data Migration Issues**:
-   - Ensure table schemas match when copying between databases
-   - Check disk space for large exports
-   - Verify file permissions for import/export paths 
+`prepublishOnly` runs the deterministic test suite, production dependency audit verifier, build verifier, built-CLI startup verifier, tool connection lifecycle verifier and self-test, docs/runtime parity verifier, security posture docs verifier, Docker runtime verifier, MCP stdio smoke verifier, workflow verifier, package contents verifier, and packed-install verifier. The CLI verifier checks help/version output and startup failure behavior for malformed tools config, unknown tools-config keys, invalid environment values, invalid allowlists, and denied connection targets. The connection lifecycle verifier checks that tool `db.connect()` calls are awaited inside a `try` block whose `finally` awaits the matching `db.disconnect()`, and that tools receiving `getConnectionString` connect with resolver-derived values. The package verifier checks that the tarball includes required runtime files and excludes source, tests, caches, lockfiles, and local development artifacts.

@@ -1,6 +1,7 @@
-import { DatabaseConnection } from '../utils/connection.js';
+import { DatabaseConnection, sanitizeErrorMessage } from '../utils/connection.js';
 import type { PostgresTool, ToolOutput, GetConnectionStringFn } from '../types/tool.js';
 import { z } from 'zod';
+import { quoteIdent, quoteQualifiedIdent, redactSqlText } from '../utils/sql.js';
 
 interface FunctionResult {
   success: boolean;
@@ -16,6 +17,66 @@ interface FunctionInfo {
   definition: string;
   volatility: string;
   owner: string;
+}
+
+interface RLSPolicyInfo {
+  schemaname: string;
+  tablename: string;
+  policyname: string;
+  roles: string[];
+  cmd: string;
+  using: string | null;
+  check: string | null;
+}
+
+function redactFunctionInfo(fn: FunctionInfo): FunctionInfo {
+  return {
+    ...fn,
+    definition: redactSqlText(fn.definition)
+  };
+}
+
+function redactRLSPolicyInfo(policy: RLSPolicyInfo): RLSPolicyInfo {
+  return {
+    ...policy,
+    using: policy.using ? redactSqlText(policy.using) : policy.using,
+    check: policy.check ? redactSqlText(policy.check) : policy.check
+  };
+}
+
+function formatValidationError(error: z.ZodError): string {
+  return error.errors.map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`).join(', ');
+}
+
+function dollarQuote(value: string): string {
+  let tag = 'function';
+  let delimiter = `$${tag}$`;
+  let counter = 0;
+
+  while (value.includes(delimiter)) {
+    counter += 1;
+    tag = `function_${counter}`;
+    delimiter = `$${tag}$`;
+  }
+
+  return `${delimiter}\n${value}\n${delimiter}`;
+}
+
+function buildFunctionSignature(parameters?: string): string {
+  if (!parameters || parameters.trim() === '') {
+    return '()';
+  }
+
+  const signature = parameters.trim();
+  if (!/^[A-Za-z0-9_.,\s[\]]+$/.test(signature)) {
+    throw new Error('Invalid function signature. Use a comma-separated list of simple PostgreSQL type names only.');
+  }
+
+  return `(${signature})`;
+}
+
+function quoteRoleName(role: string): string {
+  return role.toUpperCase() === 'PUBLIC' ? 'PUBLIC' : quoteIdent(role);
 }
 
 /**
@@ -60,7 +121,7 @@ async function _getFunctions(
     
     query += ' ORDER BY p.proname';
     
-    const functions = await db.query<FunctionInfo>(query, params);
+    const functions = (await db.query<FunctionInfo>(query, params)).map(redactFunctionInfo);
     
     return {
       success: true,
@@ -72,7 +133,7 @@ async function _getFunctions(
   } catch (error) {
     return {
       success: false,
-      message: `Failed to get function information: ${error instanceof Error ? error.message : String(error)}`,
+      message: `Failed to get function information: ${sanitizeErrorMessage(error)}`,
       details: null
     };
   } finally {
@@ -98,28 +159,27 @@ async function _createFunction(
   } = {}
 ): Promise<FunctionResult> {
   const db = DatabaseConnection.getInstance();
-  
+
   try {
-    await db.connect(connectionString);
-    
     const language = options.language || 'plpgsql';
     const volatility = options.volatility || 'VOLATILE';
     const schema = options.schema || 'public';
     const security = options.security || 'INVOKER';
     const createOrReplace = options.replace ? 'CREATE OR REPLACE' : 'CREATE';
-    
+    const qualifiedFunctionName = quoteQualifiedIdent(functionName, schema);
+    const quotedBody = dollarQuote(functionBody);
+
     // Build function creation SQL
     const sql = `
-      ${createOrReplace} FUNCTION ${schema}.${functionName}(${parameters})
+      ${createOrReplace} FUNCTION ${qualifiedFunctionName}(${parameters})
       RETURNS ${returnType}
       LANGUAGE ${language}
       ${volatility}
       SECURITY ${security}
-      AS $function$
-      ${functionBody}
-      $function$;
+      AS ${quotedBody};
     `;
-    
+
+    await db.connect(connectionString);
     await db.query(sql);
     
     return {
@@ -137,7 +197,7 @@ async function _createFunction(
   } catch (error) {
     return {
       success: false,
-      message: `Failed to create function: ${error instanceof Error ? error.message : String(error)}`,
+      message: `Failed to create function: ${sanitizeErrorMessage(error)}`,
       details: null
     };
   } finally {
@@ -159,27 +219,22 @@ async function _dropFunction(
   } = {}
 ): Promise<FunctionResult> {
   const db = DatabaseConnection.getInstance();
-  
+
   try {
-    await db.connect(connectionString);
-    
     const schema = options.schema || 'public';
     const ifExists = options.ifExists ? 'IF EXISTS' : '';
     const cascade = options.cascade ? 'CASCADE' : '';
-    
+    const qualifiedFunctionName = quoteQualifiedIdent(functionName, schema);
+
     // Build function drop SQL
-    let sql = `DROP FUNCTION ${ifExists} ${schema}.${functionName}`;
-    
-    // Add parameters if provided
-    if (parameters) {
-      sql += `(${parameters})`;
-    }
-    
+    let sql = `DROP FUNCTION ${ifExists} ${qualifiedFunctionName}${buildFunctionSignature(parameters)}`;
+
     // Add cascade if specified
     if (cascade) {
       sql += ` ${cascade}`;
     }
-    
+
+    await db.connect(connectionString);
     await db.query(sql);
     
     return {
@@ -193,7 +248,7 @@ async function _dropFunction(
   } catch (error) {
     return {
       success: false,
-      message: `Failed to drop function: ${error instanceof Error ? error.message : String(error)}`,
+      message: `Failed to drop function: ${sanitizeErrorMessage(error)}`,
       details: null
     };
   } finally {
@@ -210,11 +265,12 @@ async function _enableRLS(
   schema = 'public'
 ): Promise<FunctionResult> {
   const db = DatabaseConnection.getInstance();
-  
+
   try {
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
+
     await db.connect(connectionString);
-    
-    await db.query(`ALTER TABLE ${schema}.${tableName} ENABLE ROW LEVEL SECURITY`);
+    await db.query(`ALTER TABLE ${qualifiedTableName} ENABLE ROW LEVEL SECURITY`);
     
     return {
       success: true,
@@ -227,7 +283,7 @@ async function _enableRLS(
   } catch (error) {
     return {
       success: false,
-      message: `Failed to enable RLS: ${error instanceof Error ? error.message : String(error)}`,
+      message: `Failed to enable RLS: ${sanitizeErrorMessage(error)}`,
       details: null
     };
   } finally {
@@ -244,11 +300,12 @@ async function _disableRLS(
   schema = 'public'
 ): Promise<FunctionResult> {
   const db = DatabaseConnection.getInstance();
-  
+
   try {
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
+
     await db.connect(connectionString);
-    
-    await db.query(`ALTER TABLE ${schema}.${tableName} DISABLE ROW LEVEL SECURITY`);
+    await db.query(`ALTER TABLE ${qualifiedTableName} DISABLE ROW LEVEL SECURITY`);
     
     return {
       success: true,
@@ -261,7 +318,7 @@ async function _disableRLS(
   } catch (error) {
     return {
       success: false,
-      message: `Failed to disable RLS: ${error instanceof Error ? error.message : String(error)}`,
+      message: `Failed to disable RLS: ${sanitizeErrorMessage(error)}`,
       details: null
     };
   } finally {
@@ -286,24 +343,24 @@ async function _createRLSPolicy(
   } = {}
 ): Promise<FunctionResult> {
   const db = DatabaseConnection.getInstance();
-  
+
   try {
-    await db.connect(connectionString);
-    
     const schema = options.schema || 'public';
     const command = options.command || 'ALL';
-    const createOrReplace = options.replace ? 'CREATE OR REPLACE' : 'CREATE';
-    
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
+    const quotedPolicyName = quoteIdent(policyName);
+    const replaceSql = options.replace ? `DROP POLICY IF EXISTS ${quotedPolicyName} ON ${qualifiedTableName};\n` : '';
+
     // Build policy creation SQL
     let sql = `
-      ${createOrReplace} POLICY ${policyName}
-      ON ${schema}.${tableName}
+      ${replaceSql}CREATE POLICY ${quotedPolicyName}
+      ON ${qualifiedTableName}
       FOR ${command}
     `;
-    
+
     // Add role if specified
     if (options.role) {
-      sql += ` TO ${options.role}`;
+      sql += ` TO ${quoteRoleName(options.role)}`;
     }
     
     // Add USING expression
@@ -314,6 +371,7 @@ async function _createRLSPolicy(
       sql += ` WITH CHECK (${check})`;
     }
     
+    await db.connect(connectionString);
     await db.query(sql);
     
     return {
@@ -329,7 +387,7 @@ async function _createRLSPolicy(
   } catch (error) {
     return {
       success: false,
-      message: `Failed to create policy: ${error instanceof Error ? error.message : String(error)}`,
+      message: `Failed to create policy: ${sanitizeErrorMessage(error)}`,
       details: null
     };
   } finally {
@@ -350,14 +408,15 @@ async function _dropRLSPolicy(
   } = {}
 ): Promise<FunctionResult> {
   const db = DatabaseConnection.getInstance();
-  
+
   try {
-    await db.connect(connectionString);
-    
     const schema = options.schema || 'public';
     const ifExists = options.ifExists ? 'IF EXISTS' : '';
-    
-    await db.query(`DROP POLICY ${ifExists} ${policyName} ON ${schema}.${tableName}`);
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
+    const quotedPolicyName = quoteIdent(policyName);
+
+    await db.connect(connectionString);
+    await db.query(`DROP POLICY ${ifExists} ${quotedPolicyName} ON ${qualifiedTableName}`);
     
     return {
       success: true,
@@ -371,7 +430,7 @@ async function _dropRLSPolicy(
   } catch (error) {
     return {
       success: false,
-      message: `Failed to drop policy: ${error instanceof Error ? error.message : String(error)}`,
+      message: `Failed to drop policy: ${sanitizeErrorMessage(error)}`,
       details: null
     };
   } finally {
@@ -396,15 +455,15 @@ async function _editRLSPolicy(
   const db = DatabaseConnection.getInstance();
 
   try {
-    await db.connect(connectionString);
-
     const schema = options.schema || 'public';
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
+    const quotedPolicyName = quoteIdent(policyName);
     const alterClauses: string[] = [];
 
     if (options.roles !== undefined) {
-      const rolesString = options.roles.length === 0 
+      const rolesString = options.roles.length === 0
         ? 'PUBLIC' // Assuming empty array means PUBLIC, adjust if needed
-        : options.roles.join(', ');
+        : options.roles.map(quoteRoleName).join(', ');
       alterClauses.push(`TO ${rolesString}`);
     }
 
@@ -438,11 +497,12 @@ async function _editRLSPolicy(
     }
 
     const sql = `
-      ALTER POLICY ${policyName}
-      ON ${schema}.${tableName}
+      ALTER POLICY ${quotedPolicyName}
+      ON ${qualifiedTableName}
       ${alterClauses.join('\n')};
     `;
 
+    await db.connect(connectionString);
     await db.query(sql);
 
     return {
@@ -458,7 +518,7 @@ async function _editRLSPolicy(
   } catch (error) {
     return {
       success: false,
-      message: `Failed to edit policy: ${error instanceof Error ? error.message : String(error)}`,
+      message: `Failed to edit policy: ${sanitizeErrorMessage(error)}`,
       details: null
     };
   } finally {
@@ -501,7 +561,7 @@ async function _getRLSPolicies(
     
     query += ' ORDER BY tablename, policyname';
     
-    const policies = await db.query(query, params);
+    const policies = (await db.query<RLSPolicyInfo>(query, params)).map(redactRLSPolicyInfo);
     
     return {
       success: true,
@@ -513,7 +573,7 @@ async function _getRLSPolicies(
   } catch (error) {
     return {
       success: false,
-      message: `Failed to get policies: ${error instanceof Error ? error.message : String(error)}`,
+      message: `Failed to get policies: ${sanitizeErrorMessage(error)}`,
       details: null
     };
   } finally {
@@ -523,21 +583,23 @@ async function _getRLSPolicies(
 
 // --- Tool Definitions ---
 
+const GetFunctionsInputSchema = z.object({
+  connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
+  functionName: z.string().optional().describe('Optional function name to filter by'),
+  schema: z.string().optional().describe('Schema name (defaults to public)')
+}).strict();
+
 export const getFunctionsTool: PostgresTool = {
   name: 'pg_get_functions',
   description: 'Get information about PostgreSQL functions',
-  inputSchema: z.object({
-    connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
-    functionName: z.string().optional().describe('Optional function name to filter by'),
-    schema: z.string().optional().describe('Schema name (defaults to public)') // Assuming 'public' default is handled in execute or not strictly enforced by schema
-  }),
-  // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-  execute: async (args: any, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
-    const { connectionString: connStringArg, functionName, schema } = args as {
-      connectionString?: string;
-      functionName?: string;
-      schema?: string;
-    };
+  inputSchema: GetFunctionsInputSchema,
+  execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
+    const validationResult = GetFunctionsInputSchema.safeParse(args);
+    if (!validationResult.success) {
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
+    }
+
+    const { connectionString: connStringArg, functionName, schema } = validationResult.data;
     const resolvedConnString = getConnectionStringVal(connStringArg);
     const result = await _getFunctions(resolvedConnString, functionName, schema);
     if (result.success) {
@@ -547,215 +609,285 @@ export const getFunctionsTool: PostgresTool = {
   },
 };
 
+const CreateFunctionInputSchema = z.object({
+  connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
+  functionName: z.string().describe('Name of the function to create'),
+  parameters: z.string().optional().default('').describe('Function parameters. Use empty string "" for functions with no parameters'),
+  returnType: z.string().describe('Return type of the function'),
+  functionBody: z.string().describe('Function body code'),
+  language: z.enum(['sql', 'plpgsql', 'plpython3u']).optional().describe('Function language'),
+  volatility: z.enum(['VOLATILE', 'STABLE', 'IMMUTABLE']).optional().describe('Function volatility'),
+  schema: z.string().optional().describe('Schema name (defaults to public)'),
+  security: z.enum(['INVOKER', 'DEFINER']).optional().describe('Function security context'),
+  replace: z.boolean().optional().describe('Whether to replace the function if it exists')
+}).strict();
+
 export const createFunctionTool: PostgresTool = {
   name: 'pg_create_function',
   description: 'Create or replace a PostgreSQL function',
-  inputSchema: z.object({
-    connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
-    functionName: z.string().describe('Name of the function to create'),
-    parameters: z.string().describe('Function parameters - required for create operation, required for drop when function is overloaded. Use empty string "" for functions with no parameters'),
-    returnType: z.string().describe('Return type of the function'),
-    functionBody: z.string().describe('Function body code'),
-    language: z.enum(['sql', 'plpgsql', 'plpython3u']).describe('Function language'),
-    volatility: z.enum(['VOLATILE', 'STABLE', 'IMMUTABLE']).describe('Function volatility'),
-    schema: z.string().describe('Schema name (defaults to public)'),
-    security: z.enum(['INVOKER', 'DEFINER']).describe('Function security context'),
-    replace: z.boolean().describe('Whether to replace the function if it exists')
-  }),
-  // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-  execute: async (args: any, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
-    const { 
-        connectionString: connStringArg, 
-        functionName, 
-        parameters, 
-        returnType, 
-        functionBody, 
-        language, 
-        volatility, 
-        schema, 
-        security, 
-        replace 
-    } = args as {
-      connectionString?: string;
-      functionName: string;
-      parameters: string;
-      returnType: string;
-      functionBody: string;
-      language?: 'sql' | 'plpgsql' | 'plpython3u';
-      volatility?: 'VOLATILE' | 'STABLE' | 'IMMUTABLE';
-      schema?: string;
-      security?: 'INVOKER' | 'DEFINER';
-      replace?: boolean;
-    };
-    const resolvedConnString = getConnectionStringVal(connStringArg);
-    const result = await _createFunction(resolvedConnString, functionName, parameters, returnType, functionBody, { language, volatility, schema, security, replace });
-    if (result.success) {
-      return { content: [{ type: 'text', text: result.message + (result.details ? ` Details: ${JSON.stringify(result.details)}` : '') }] };
+  inputSchema: CreateFunctionInputSchema,
+  execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
+    const validationResult = CreateFunctionInputSchema.safeParse(args);
+    if (!validationResult.success) {
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
-    return { content: [{ type: 'text', text: result.message }], isError: true };
+
+    const {
+      connectionString: connStringArg,
+      functionName,
+      parameters,
+      returnType,
+      functionBody,
+      language,
+      volatility,
+      schema,
+      security,
+      replace
+    } = validationResult.data;
+    try {
+      quoteQualifiedIdent(functionName, schema || 'public');
+      buildFunctionSignature(parameters);
+      const resolvedConnString = getConnectionStringVal(connStringArg);
+      const result = await _createFunction(resolvedConnString, functionName, parameters, returnType, functionBody, { language, volatility, schema, security, replace });
+      if (result.success) {
+        return { content: [{ type: 'text', text: result.message + (result.details ? ` Details: ${JSON.stringify(result.details)}` : '') }] };
+      }
+      return { content: [{ type: 'text', text: result.message }], isError: true };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error creating function: ${sanitizeErrorMessage(error)}` }], isError: true };
+    }
   },
 };
+
+const DropFunctionInputSchema = z.object({
+  connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
+  functionName: z.string().describe('Name of the function to drop'),
+  parameters: z.string().optional().describe('Function parameters signature (required for overloaded functions)'),
+  schema: z.string().optional().describe('Schema name (defaults to public)'),
+  ifExists: z.boolean().optional().describe('Whether to include IF EXISTS clause'),
+  cascade: z.boolean().optional().describe('Whether to include CASCADE clause')
+}).strict();
 
 export const dropFunctionTool: PostgresTool = {
   name: 'pg_drop_function',
   description: 'Drop a PostgreSQL function',
-  inputSchema: z.object({
-    connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
-    functionName: z.string().describe('Name of the function to drop'),
-    parameters: z.string().describe('Function parameters signature (required for overloaded functions)'),
-    schema: z.string().describe('Schema name (defaults to public)'),
-    ifExists: z.boolean().describe('Whether to include IF EXISTS clause'),
-    cascade: z.boolean().describe('Whether to include CASCADE clause')
-  }),
-  // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-  execute: async (args: any, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
-    const { 
-        connectionString: connStringArg, 
-        functionName, 
-        parameters, 
-        schema, 
-        ifExists, 
-        cascade 
-    } = args as {
-        connectionString?: string;
-        functionName: string;
-        parameters?: string;
-        schema?: string;
-        ifExists?: boolean;
-        cascade?: boolean;
-    };
-    const resolvedConnString = getConnectionStringVal(connStringArg);
-    const result = await _dropFunction(resolvedConnString, functionName, parameters, { schema, ifExists, cascade });
-    if (result.success) {
-      return { content: [{ type: 'text', text: result.message + (result.details ? ` Details: ${JSON.stringify(result.details)}` : '') }] };
+  inputSchema: DropFunctionInputSchema,
+  execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
+    const validationResult = DropFunctionInputSchema.safeParse(args);
+    if (!validationResult.success) {
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
-    return { content: [{ type: 'text', text: result.message }], isError: true };
+
+    const {
+      connectionString: connStringArg,
+      functionName,
+      parameters,
+      schema,
+      ifExists,
+      cascade
+    } = validationResult.data;
+    try {
+      quoteQualifiedIdent(functionName, schema || 'public');
+      buildFunctionSignature(parameters);
+      const resolvedConnString = getConnectionStringVal(connStringArg);
+      const result = await _dropFunction(resolvedConnString, functionName, parameters, { schema, ifExists, cascade });
+      if (result.success) {
+        return { content: [{ type: 'text', text: result.message + (result.details ? ` Details: ${JSON.stringify(result.details)}` : '') }] };
+      }
+      return { content: [{ type: 'text', text: result.message }], isError: true };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error dropping function: ${sanitizeErrorMessage(error)}` }], isError: true };
+    }
   },
 };
+
+const ToggleRLSInputSchema = z.object({
+  connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
+  tableName: z.string().describe('Name of the table'),
+  schema: z.string().optional().describe('Schema name (defaults to public)')
+}).strict();
 
 export const enableRLSTool: PostgresTool = {
   name: 'pg_enable_rls',
   description: 'Enable Row-Level Security on a table',
-  inputSchema: z.object({
-    connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
-    tableName: z.string().describe('Name of the table to enable RLS on'),
-    schema: z.string().describe('Schema name (defaults to public)')
-  }),
-  // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-  execute: async (args: any, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
-    const { connectionString: connStringArg, tableName, schema } = args;
-    const resolvedConnString = getConnectionStringVal(connStringArg);
-    const result = await _enableRLS(resolvedConnString, tableName, schema);
-    if (result.success) {
-      return { content: [{ type: 'text', text: result.message + (result.details ? ` Details: ${JSON.stringify(result.details)}` : '') }] };
+  inputSchema: ToggleRLSInputSchema,
+  execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
+    const validationResult = ToggleRLSInputSchema.safeParse(args);
+    if (!validationResult.success) {
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
-    return { content: [{ type: 'text', text: result.message }], isError: true };
+
+    const { connectionString: connStringArg, tableName, schema } = validationResult.data;
+    try {
+      quoteQualifiedIdent(tableName, schema || 'public');
+      const resolvedConnString = getConnectionStringVal(connStringArg);
+      const result = await _enableRLS(resolvedConnString, tableName, schema);
+      if (result.success) {
+        return { content: [{ type: 'text', text: result.message + (result.details ? ` Details: ${JSON.stringify(result.details)}` : '') }] };
+      }
+      return { content: [{ type: 'text', text: result.message }], isError: true };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error enabling RLS: ${sanitizeErrorMessage(error)}` }], isError: true };
+    }
   }
 };
 
 export const disableRLSTool: PostgresTool = {
   name: 'pg_disable_rls',
   description: 'Disable Row-Level Security on a table',
-  inputSchema: z.object({
-    connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
-    tableName: z.string().describe('Name of the table to disable RLS on'),
-    schema: z.string().describe('Schema name (defaults to public)')
-  }),
-  // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-  execute: async (args: any, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
-    const { connectionString: connStringArg, tableName, schema } = args;
-    const resolvedConnString = getConnectionStringVal(connStringArg);
-    const result = await _disableRLS(resolvedConnString, tableName, schema);
-    if (result.success) {
-      return { content: [{ type: 'text', text: result.message + (result.details ? ` Details: ${JSON.stringify(result.details)}` : '') }] };
+  inputSchema: ToggleRLSInputSchema,
+  execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
+    const validationResult = ToggleRLSInputSchema.safeParse(args);
+    if (!validationResult.success) {
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
-    return { content: [{ type: 'text', text: result.message }], isError: true };
+
+    const { connectionString: connStringArg, tableName, schema } = validationResult.data;
+    try {
+      quoteQualifiedIdent(tableName, schema || 'public');
+      const resolvedConnString = getConnectionStringVal(connStringArg);
+      const result = await _disableRLS(resolvedConnString, tableName, schema);
+      if (result.success) {
+        return { content: [{ type: 'text', text: result.message + (result.details ? ` Details: ${JSON.stringify(result.details)}` : '') }] };
+      }
+      return { content: [{ type: 'text', text: result.message }], isError: true };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error disabling RLS: ${sanitizeErrorMessage(error)}` }], isError: true };
+    }
   }
 };
+
+const CreateRLSPolicyInputSchema = z.object({
+  connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
+  tableName: z.string().describe('Name of the table to create policy on'),
+  policyName: z.string().describe('Name of the policy to create'),
+  using: z.string().describe('USING expression for the policy'),
+  check: z.string().optional().describe('WITH CHECK expression for the policy'),
+  schema: z.string().optional().describe('Schema name (defaults to public)'),
+  command: z.enum(['ALL', 'SELECT', 'INSERT', 'UPDATE', 'DELETE']).optional().describe('Command the policy applies to'),
+  role: z.string().optional().describe('Role the policy applies to'),
+  replace: z.boolean().optional().describe('Whether to replace the policy if it exists')
+}).strict();
 
 export const createRLSPolicyTool: PostgresTool = {
   name: 'pg_create_rls_policy',
   description: 'Create a Row-Level Security policy',
-  inputSchema: z.object({
-    connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
-    tableName: z.string().describe('Name of the table to create policy on'),
-    policyName: z.string().describe('Name of the policy to create'),
-    using: z.string().describe('USING expression for the policy (e.g., "user_id = current_user_id()")'),
-    check: z.string().describe('WITH CHECK expression for the policy (if different from USING)'),
-    schema: z.string().describe('Schema name (defaults to public)'),
-    command: z.enum(['ALL', 'SELECT', 'INSERT', 'UPDATE', 'DELETE']).describe('Command the policy applies to'),
-    role: z.string().describe('Role the policy applies to'),
-    replace: z.boolean().describe('Whether to replace the policy if it exists')
-  }),
-  // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-  execute: async (args: any, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
-    const { connectionString: connStringArg, tableName, policyName, using, check, schema, command, role, replace } = args;
-    const resolvedConnString = getConnectionStringVal(connStringArg);
-    const result = await _createRLSPolicy(resolvedConnString, tableName, policyName, using, check, { schema, command, role, replace });
-    if (result.success) {
-      return { content: [{ type: 'text', text: result.message + (result.details ? ` Details: ${JSON.stringify(result.details)}` : '') }] };
+  inputSchema: CreateRLSPolicyInputSchema,
+  execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
+    const validationResult = CreateRLSPolicyInputSchema.safeParse(args);
+    if (!validationResult.success) {
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
-    return { content: [{ type: 'text', text: result.message }], isError: true };
+
+    const { connectionString: connStringArg, tableName, policyName, using, check, schema, command, role, replace } = validationResult.data;
+    try {
+      quoteQualifiedIdent(tableName, schema || 'public');
+      quoteIdent(policyName);
+      if (role) {
+        quoteRoleName(role);
+      }
+      const resolvedConnString = getConnectionStringVal(connStringArg);
+      const result = await _createRLSPolicy(resolvedConnString, tableName, policyName, using, check, { schema, command, role, replace });
+      if (result.success) {
+        return { content: [{ type: 'text', text: result.message + (result.details ? ` Details: ${JSON.stringify(result.details)}` : '') }] };
+      }
+      return { content: [{ type: 'text', text: result.message }], isError: true };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error creating RLS policy: ${sanitizeErrorMessage(error)}` }], isError: true };
+    }
   }
 };
+
+const DropRLSPolicyInputSchema = z.object({
+  connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
+  tableName: z.string().describe('Name of the table the policy is on'),
+  policyName: z.string().describe('Name of the policy to drop'),
+  schema: z.string().optional().describe('Schema name (defaults to public)'),
+  ifExists: z.boolean().optional().describe('Whether to include IF EXISTS clause')
+}).strict();
 
 export const dropRLSPolicyTool: PostgresTool = {
   name: 'pg_drop_rls_policy',
   description: 'Drop a Row-Level Security policy',
-  inputSchema: z.object({
-    connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
-    tableName: z.string().describe('Name of the table the policy is on'),
-    policyName: z.string().describe('Name of the policy to drop'),
-    schema: z.string().describe('Schema name (defaults to public)'),
-    ifExists: z.boolean().describe('Whether to include IF EXISTS clause')
-  }),
-  // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-  execute: async (args: any, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
-    const { connectionString: connStringArg, tableName, policyName, schema, ifExists } = args;
-    const resolvedConnString = getConnectionStringVal(connStringArg);
-    const result = await _dropRLSPolicy(resolvedConnString, tableName, policyName, { schema, ifExists });
-    if (result.success) {
-      return { content: [{ type: 'text', text: result.message + (result.details ? ` Details: ${JSON.stringify(result.details)}` : '') }] };
+  inputSchema: DropRLSPolicyInputSchema,
+  execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
+    const validationResult = DropRLSPolicyInputSchema.safeParse(args);
+    if (!validationResult.success) {
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
-    return { content: [{ type: 'text', text: result.message }], isError: true };
+
+    const { connectionString: connStringArg, tableName, policyName, schema, ifExists } = validationResult.data;
+    try {
+      quoteQualifiedIdent(tableName, schema || 'public');
+      quoteIdent(policyName);
+      const resolvedConnString = getConnectionStringVal(connStringArg);
+      const result = await _dropRLSPolicy(resolvedConnString, tableName, policyName, { schema, ifExists });
+      if (result.success) {
+        return { content: [{ type: 'text', text: result.message + (result.details ? ` Details: ${JSON.stringify(result.details)}` : '') }] };
+      }
+      return { content: [{ type: 'text', text: result.message }], isError: true };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error dropping RLS policy: ${sanitizeErrorMessage(error)}` }], isError: true };
+    }
   }
 };
+
+const EditRLSPolicyInputSchema = z.object({
+  connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
+  tableName: z.string().describe('Name of the table the policy is on'),
+  policyName: z.string().describe('Name of the policy to edit'),
+  schema: z.string().optional().describe('Schema name (defaults to public)'),
+  roles: z.array(z.string()).optional().describe('New list of roles the policy applies to'),
+  using: z.string().optional().describe('New USING expression for the policy'),
+  check: z.string().optional().describe('New WITH CHECK expression for the policy')
+}).strict();
 
 export const editRLSPolicyTool: PostgresTool = {
   name: 'pg_edit_rls_policy',
   description: 'Edit an existing Row-Level Security policy',
-  inputSchema: z.object({
-    connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
-    tableName: z.string().describe('Name of the table the policy is on'),
-    policyName: z.string().describe('Name of the policy to edit'),
-    schema: z.string().describe('Schema name (defaults to public)'),
-    roles: z.array(z.string()).describe('New list of roles the policy applies to (e.g., ["role1", "role2"]. Use PUBLIC or leave empty for all roles)'),
-    using: z.string().describe('New USING expression for the policy'),
-    check: z.string().describe('New WITH CHECK expression for the policy')
-  }),
-  // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-  execute: async (args: any, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
-    const { connectionString: connStringArg, tableName, policyName, schema, roles, using, check } = args;
-    const resolvedConnString = getConnectionStringVal(connStringArg);
-    const result = await _editRLSPolicy(resolvedConnString, tableName, policyName, { schema, roles, using, check });
-    if (result.success) {
-      return { content: [{ type: 'text', text: result.message + (result.details ? ` Details: ${JSON.stringify(result.details)}` : '') }] };
+  inputSchema: EditRLSPolicyInputSchema,
+  execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
+    const validationResult = EditRLSPolicyInputSchema.safeParse(args);
+    if (!validationResult.success) {
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
-    return { content: [{ type: 'text', text: result.message }], isError: true };
+
+    const { connectionString: connStringArg, tableName, policyName, schema, roles, using, check } = validationResult.data;
+    try {
+      quoteQualifiedIdent(tableName, schema || 'public');
+      quoteIdent(policyName);
+      if (roles) {
+        roles.forEach(quoteRoleName);
+      }
+      const resolvedConnString = getConnectionStringVal(connStringArg);
+      const result = await _editRLSPolicy(resolvedConnString, tableName, policyName, { schema, roles, using, check });
+      if (result.success) {
+        return { content: [{ type: 'text', text: result.message + (result.details ? ` Details: ${JSON.stringify(result.details)}` : '') }] };
+      }
+      return { content: [{ type: 'text', text: result.message }], isError: true };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error editing RLS policy: ${sanitizeErrorMessage(error)}` }], isError: true };
+    }
   }
 };
+
+const GetRLSPoliciesInputSchema = z.object({
+  connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
+  tableName: z.string().optional().describe('Optional table name to filter by'),
+  schema: z.string().optional().describe('Schema name (defaults to public)')
+}).strict();
 
 export const getRLSPoliciesTool: PostgresTool = {
   name: 'pg_get_rls_policies',
   description: 'Get Row-Level Security policies',
-  inputSchema: z.object({
-    connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
-    tableName: z.string().optional().describe('Optional table name to filter by'),
-    schema: z.string().optional().describe('Schema name (defaults to public)')
-  }),
-  // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-  execute: async (args: any, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
-    const { connectionString: connStringArg, tableName, schema } = args;
+  inputSchema: GetRLSPoliciesInputSchema,
+  execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
+    const validationResult = GetRLSPoliciesInputSchema.safeParse(args);
+    if (!validationResult.success) {
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
+    }
+
+    const { connectionString: connStringArg, tableName, schema } = validationResult.data;
     const resolvedConnString = getConnectionStringVal(connStringArg);
     const result = await _getRLSPolicies(resolvedConnString, tableName, schema);
     if (result.success) {
@@ -765,34 +897,40 @@ export const getRLSPoliciesTool: PostgresTool = {
   }
 };
 
+const ManageFunctionsInputSchema = z.object({
+  connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
+  operation: z.enum(['get', 'create', 'drop']).describe('Operation to perform: get (list/info), create (new function), or drop (remove function)'),
+
+  // Common parameters
+  functionName: z.string().optional().describe('Name of the function (required for create/drop, optional for get to filter)'),
+  schema: z.string().optional().describe('Schema name (defaults to public)'),
+
+  // Create operation parameters
+  parameters: z.string().optional().describe('Function parameters - required for create operation, required for drop when function is overloaded. Use empty string "" for functions with no parameters'),
+  returnType: z.string().optional().describe('Return type of the function (required for create operation)'),
+  functionBody: z.string().optional().describe('Function body code (required for create operation)'),
+  language: z.enum(['sql', 'plpgsql', 'plpython3u']).optional().describe('Function language (defaults to plpgsql for create)'),
+  volatility: z.enum(['VOLATILE', 'STABLE', 'IMMUTABLE']).optional().describe('Function volatility (defaults to VOLATILE for create)'),
+  security: z.enum(['INVOKER', 'DEFINER']).optional().describe('Function security context (defaults to INVOKER for create)'),
+  replace: z.boolean().optional().describe('Whether to replace the function if it exists (for create operation)'),
+
+  // Drop operation parameters
+  ifExists: z.boolean().optional().describe('Whether to include IF EXISTS clause (for drop operation)'),
+  cascade: z.boolean().optional().describe('Whether to include CASCADE clause (for drop operation)')
+}).strict();
+
 // Consolidated Functions Management Tool
 export const manageFunctionsTool: PostgresTool = {
   name: 'pg_manage_functions',
   description: 'Manage PostgreSQL functions - get, create, or drop functions with a single tool. Examples: operation="get" to list functions, operation="create" with functionName="test_func", parameters="" (empty for no params), returnType="TEXT", functionBody="SELECT \'Hello\'"',
-  inputSchema: z.object({
-    connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
-    operation: z.enum(['get', 'create', 'drop']).describe('Operation to perform: get (list/info), create (new function), or drop (remove function)'),
-    
-    // Common parameters
-    functionName: z.string().optional().describe('Name of the function (required for create/drop, optional for get to filter)'),
-    schema: z.string().optional().describe('Schema name (defaults to public)'),
-    
-    // Create operation parameters
-    parameters: z.string().optional().describe('Function parameters - required for create operation, required for drop when function is overloaded. Use empty string "" for functions with no parameters'),
-    returnType: z.string().optional().describe('Return type of the function (required for create operation)'),
-    functionBody: z.string().optional().describe('Function body code (required for create operation)'),
-    language: z.enum(['sql', 'plpgsql', 'plpython3u']).optional().describe('Function language (defaults to plpgsql for create)'),
-    volatility: z.enum(['VOLATILE', 'STABLE', 'IMMUTABLE']).optional().describe('Function volatility (defaults to VOLATILE for create)'),
-    security: z.enum(['INVOKER', 'DEFINER']).optional().describe('Function security context (defaults to INVOKER for create)'),
-    replace: z.boolean().optional().describe('Whether to replace the function if it exists (for create operation)'),
-    
-    // Drop operation parameters  
-    ifExists: z.boolean().optional().describe('Whether to include IF EXISTS clause (for drop operation)'),
-    cascade: z.boolean().optional().describe('Whether to include CASCADE clause (for drop operation)')
-  }),
-  // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-  execute: async (args: any, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
-    const { 
+  inputSchema: ManageFunctionsInputSchema,
+  execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
+    const validationResult = ManageFunctionsInputSchema.safeParse(args);
+    if (!validationResult.success) {
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
+    }
+
+    const {
       connectionString: connStringArg,
       operation,
       functionName,
@@ -806,46 +944,22 @@ export const manageFunctionsTool: PostgresTool = {
       replace,
       ifExists,
       cascade
-    } = args as {
-      connectionString?: string;
-      operation: 'get' | 'create' | 'drop';
-      functionName?: string;
-      schema?: string;
-      parameters?: string;
-      returnType?: string;
-      functionBody?: string;
-      language?: 'sql' | 'plpgsql' | 'plpython3u';
-      volatility?: 'VOLATILE' | 'STABLE' | 'IMMUTABLE';
-      security?: 'INVOKER' | 'DEFINER';
-      replace?: boolean;
-      ifExists?: boolean;
-      cascade?: boolean;
-    };
+    } = validationResult.data;
 
-    const resolvedConnString = getConnectionStringVal(connStringArg);
     let result: FunctionResult;
 
     try {
       switch (operation) {
-        case 'get':
+        case 'get': {
+          const resolvedConnString = getConnectionStringVal(connStringArg);
           result = await _getFunctions(resolvedConnString, functionName, schema);
           if (result.success) {
             return { content: [{ type: 'text', text: JSON.stringify(result.details, null, 2) || result.message }] };
           }
           break;
+        }
 
         case 'create': {
-          // Debug logging to understand what's being passed
-          console.error('DEBUG - Create operation parameters:', {
-            functionName: functionName,
-            parameters: parameters,
-            returnType: returnType,
-            functionBody: functionBody,
-            parametersType: typeof parameters,
-            parametersUndefined: parameters === undefined,
-            parametersNull: parameters === null
-          });
-          
           // Fix validation: be more specific about which fields are missing
           const missingFields = [];
           if (!functionName) missingFields.push('functionName');
@@ -853,15 +967,18 @@ export const manageFunctionsTool: PostgresTool = {
           if (!functionBody) missingFields.push('functionBody');
           
           if (missingFields.length > 0) {
-            return { 
-              content: [{ type: 'text', text: `Error: Missing required fields: ${missingFields.join(', ')}. Note: parameters can be empty string "" for functions with no parameters` }], 
-              isError: true 
+            return {
+              content: [{ type: 'text', text: `Error: Missing required fields: ${missingFields.join(', ')}. Note: parameters can be empty string "" for functions with no parameters` }],
+              isError: true
             };
           }
-          
+
           // Normalize parameters: treat undefined, null, or whitespace-only as empty string
-          const normalizedParameters: string = parameters === undefined || parameters === null ? '' : 
+          const normalizedParameters: string = parameters === undefined || parameters === null ? '' :
             (typeof parameters === 'string' && parameters.trim() === '') ? '' : String(parameters);
+          quoteQualifiedIdent(functionName as string, schema || 'public');
+          buildFunctionSignature(normalizedParameters);
+          const resolvedConnString = getConnectionStringVal(connStringArg);
           result = await _createFunction(resolvedConnString, functionName as string, normalizedParameters, returnType as string, functionBody as string, {
             language,
             volatility,
@@ -874,11 +991,14 @@ export const manageFunctionsTool: PostgresTool = {
 
         case 'drop':
           if (!functionName) {
-            return { 
-              content: [{ type: 'text', text: 'Error: functionName is required for drop operation' }], 
-              isError: true 
+            return {
+              content: [{ type: 'text', text: 'Error: functionName is required for drop operation' }],
+              isError: true
             };
           }
+          quoteQualifiedIdent(functionName, schema || 'public');
+          buildFunctionSignature(parameters);
+          const resolvedConnString = getConnectionStringVal(connStringArg);
           result = await _dropFunction(resolvedConnString, functionName, parameters, {
             schema,
             ifExists,
@@ -899,43 +1019,49 @@ export const manageFunctionsTool: PostgresTool = {
       return { content: [{ type: 'text', text: result.message }], isError: true };
 
     } catch (error) {
-      return { 
-        content: [{ type: 'text', text: `Error executing ${operation} operation: ${error instanceof Error ? error.message : String(error)}` }], 
-        isError: true 
+      return {
+        content: [{ type: 'text', text: `Error executing ${operation} operation: ${sanitizeErrorMessage(error)}` }],
+        isError: true
       };
     }
   }
 };
 
+const ManageRLSInputSchema = z.object({
+  connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
+  operation: z.enum(['enable', 'disable', 'create_policy', 'edit_policy', 'drop_policy', 'get_policies']).describe('Operation: enable/disable RLS, create_policy, edit_policy, drop_policy, get_policies'),
+
+  // Common parameters
+  tableName: z.string().optional().describe('Table name (required for enable/disable/create_policy/edit_policy/drop_policy, optional filter for get_policies)'),
+  schema: z.string().optional().describe('Schema name (defaults to public)'),
+
+  // Policy-specific parameters
+  policyName: z.string().optional().describe('Policy name (required for create_policy/edit_policy/drop_policy)'),
+  using: z.string().optional().describe('USING expression for policy (required for create_policy, optional for edit_policy)'),
+  check: z.string().optional().describe('WITH CHECK expression for policy (optional for create_policy/edit_policy)'),
+  command: z.enum(['ALL', 'SELECT', 'INSERT', 'UPDATE', 'DELETE']).optional().describe('Command the policy applies to (for create_policy)'),
+  role: z.string().optional().describe('Role the policy applies to (for create_policy)'),
+  replace: z.boolean().optional().describe('Whether to replace policy if exists (for create_policy)'),
+
+  // Edit policy parameters
+  roles: z.array(z.string()).optional().describe('List of roles for policy (for edit_policy)'),
+
+  // Drop policy parameters
+  ifExists: z.boolean().optional().describe('Include IF EXISTS clause (for drop_policy)')
+}).strict();
+
 // Consolidated Row-Level Security Management Tool
 export const manageRLSTool: PostgresTool = {
   name: 'pg_manage_rls',
   description: 'Manage PostgreSQL Row-Level Security - enable/disable RLS and manage policies. Examples: operation="enable" with tableName="users", operation="create_policy" with tableName, policyName, using, check',
-  inputSchema: z.object({
-    connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
-    operation: z.enum(['enable', 'disable', 'create_policy', 'edit_policy', 'drop_policy', 'get_policies']).describe('Operation: enable/disable RLS, create_policy, edit_policy, drop_policy, get_policies'),
-    
-    // Common parameters
-    tableName: z.string().optional().describe('Table name (required for enable/disable/create_policy/edit_policy/drop_policy, optional filter for get_policies)'),
-    schema: z.string().optional().describe('Schema name (defaults to public)'),
-    
-    // Policy-specific parameters
-    policyName: z.string().optional().describe('Policy name (required for create_policy/edit_policy/drop_policy)'),
-    using: z.string().optional().describe('USING expression for policy (required for create_policy, optional for edit_policy)'),
-    check: z.string().optional().describe('WITH CHECK expression for policy (optional for create_policy/edit_policy)'),
-    command: z.enum(['ALL', 'SELECT', 'INSERT', 'UPDATE', 'DELETE']).optional().describe('Command the policy applies to (for create_policy)'),
-    role: z.string().optional().describe('Role the policy applies to (for create_policy)'),
-    replace: z.boolean().optional().describe('Whether to replace policy if exists (for create_policy)'),
-    
-    // Edit policy parameters
-    roles: z.array(z.string()).optional().describe('List of roles for policy (for edit_policy)'),
-    
-    // Drop policy parameters
-    ifExists: z.boolean().optional().describe('Include IF EXISTS clause (for drop_policy)')
-  }),
-  // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-  execute: async (args: any, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
-    const { 
+  inputSchema: ManageRLSInputSchema,
+  execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
+    const validationResult = ManageRLSInputSchema.safeParse(args);
+    if (!validationResult.success) {
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
+    }
+
+    const {
       connectionString: connStringArg,
       operation,
       tableName,
@@ -948,55 +1074,51 @@ export const manageRLSTool: PostgresTool = {
       replace,
       roles,
       ifExists
-    } = args as {
-      connectionString?: string;
-      operation: 'enable' | 'disable' | 'create_policy' | 'edit_policy' | 'drop_policy' | 'get_policies';
-      tableName?: string;
-      schema?: string;
-      policyName?: string;
-      using?: string;
-      check?: string;
-      command?: 'ALL' | 'SELECT' | 'INSERT' | 'UPDATE' | 'DELETE';
-      role?: string;
-      replace?: boolean;
-      roles?: string[];
-      ifExists?: boolean;
-    };
+    } = validationResult.data;
 
-    const resolvedConnString = getConnectionStringVal(connStringArg);
     let result: FunctionResult;
 
     try {
       switch (operation) {
         case 'enable': {
           if (!tableName) {
-            return { 
-              content: [{ type: 'text', text: 'Error: tableName is required for enable operation' }], 
-              isError: true 
+            return {
+              content: [{ type: 'text', text: 'Error: tableName is required for enable operation' }],
+              isError: true
             };
           }
+          quoteQualifiedIdent(tableName, schema || 'public');
+          const resolvedConnString = getConnectionStringVal(connStringArg);
           result = await _enableRLS(resolvedConnString, tableName, schema);
           break;
         }
 
         case 'disable': {
           if (!tableName) {
-            return { 
-              content: [{ type: 'text', text: 'Error: tableName is required for disable operation' }], 
-              isError: true 
+            return {
+              content: [{ type: 'text', text: 'Error: tableName is required for disable operation' }],
+              isError: true
             };
           }
+          quoteQualifiedIdent(tableName, schema || 'public');
+          const resolvedConnString = getConnectionStringVal(connStringArg);
           result = await _disableRLS(resolvedConnString, tableName, schema);
           break;
         }
 
         case 'create_policy': {
           if (!tableName || !policyName || !using) {
-            return { 
-              content: [{ type: 'text', text: 'Error: tableName, policyName, and using are required for create_policy operation' }], 
-              isError: true 
+            return {
+              content: [{ type: 'text', text: 'Error: tableName, policyName, and using are required for create_policy operation' }],
+              isError: true
             };
           }
+          quoteQualifiedIdent(tableName, schema || 'public');
+          quoteIdent(policyName);
+          if (role) {
+            quoteRoleName(role);
+          }
+          const resolvedConnString = getConnectionStringVal(connStringArg);
           result = await _createRLSPolicy(resolvedConnString, tableName, policyName, using, check, {
             schema,
             command,
@@ -1008,11 +1130,17 @@ export const manageRLSTool: PostgresTool = {
 
         case 'edit_policy': {
           if (!tableName || !policyName) {
-            return { 
-              content: [{ type: 'text', text: 'Error: tableName and policyName are required for edit_policy operation' }], 
-              isError: true 
+            return {
+              content: [{ type: 'text', text: 'Error: tableName and policyName are required for edit_policy operation' }],
+              isError: true
             };
           }
+          quoteQualifiedIdent(tableName, schema || 'public');
+          quoteIdent(policyName);
+          if (roles) {
+            roles.forEach(quoteRoleName);
+          }
+          const resolvedConnString = getConnectionStringVal(connStringArg);
           result = await _editRLSPolicy(resolvedConnString, tableName, policyName, {
             schema,
             roles,
@@ -1024,11 +1152,14 @@ export const manageRLSTool: PostgresTool = {
 
         case 'drop_policy': {
           if (!tableName || !policyName) {
-            return { 
-              content: [{ type: 'text', text: 'Error: tableName and policyName are required for drop_policy operation' }], 
-              isError: true 
+            return {
+              content: [{ type: 'text', text: 'Error: tableName and policyName are required for drop_policy operation' }],
+              isError: true
             };
           }
+          quoteQualifiedIdent(tableName, schema || 'public');
+          quoteIdent(policyName);
+          const resolvedConnString = getConnectionStringVal(connStringArg);
           result = await _dropRLSPolicy(resolvedConnString, tableName, policyName, {
             schema,
             ifExists
@@ -1037,6 +1168,7 @@ export const manageRLSTool: PostgresTool = {
         }
 
         case 'get_policies': {
+          const resolvedConnString = getConnectionStringVal(connStringArg);
           result = await _getRLSPolicies(resolvedConnString, tableName, schema);
           if (result.success) {
             return { content: [{ type: 'text', text: JSON.stringify(result.details, null, 2) || result.message }] };
@@ -1057,9 +1189,9 @@ export const manageRLSTool: PostgresTool = {
       return { content: [{ type: 'text', text: result.message }], isError: true };
 
     } catch (error) {
-      return { 
-        content: [{ type: 'text', text: `Error executing ${operation} operation: ${error instanceof Error ? error.message : String(error)}` }], 
-        isError: true 
+      return {
+        content: [{ type: 'text', text: `Error executing ${operation} operation: ${sanitizeErrorMessage(error)}` }],
+        isError: true
       };
     }
   }

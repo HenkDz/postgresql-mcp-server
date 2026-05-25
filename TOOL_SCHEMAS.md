@@ -1,6 +1,6 @@
 # PostgreSQL MCP Server - Complete Tool Schema Reference
 
-> **Quick Reference**: This document contains the complete parameter schemas for all 17 tools. No more hunting through multiple docs!
+> **Quick Reference**: This document contains the complete parameter schemas for all 18 tools. No more hunting through multiple docs!
 
 ## 🚀 Quick Navigation
 
@@ -37,11 +37,13 @@
       "name": "id",             // required
       "type": "SERIAL",         // required: PostgreSQL data type
       "nullable": false,        // optional, defaults to true
-      "default": "DEFAULT_VALUE" // optional
+      "default": "DEFAULT_VALUE" // optional raw SQL expression; requires unsafe mode
     }
   ]
 }
 ```
+
+Table, schema, enum, and column names are restricted to simple PostgreSQL identifiers and quoted by the server. Column `type` accepts simple PostgreSQL type names such as `text`, `integer`, `numeric(10,2)`, `timestamp with time zone`, or `schema.type`. Column `default` is a raw SQL expression and requires `--security-mode unsafe --allow-destructive`.
 
 #### Alter Table
 ```json
@@ -55,7 +57,7 @@
       "columnName": "email",    // required
       "dataType": "VARCHAR(255)", // required for add/alter
       "nullable": false,        // optional for add/alter
-      "default": "DEFAULT_VALUE" // optional for add/alter
+      "default": "DEFAULT_VALUE" // optional raw SQL expression; requires unsafe mode
     }
   ]
 }
@@ -98,7 +100,7 @@
   "superuser": false,           // optional
   "replication": false,         // optional
   "inherit": true,              // optional
-  "connectionLimit": 10,        // optional
+  "connectionLimit": 10,        // optional: -1 for unlimited
   "validUntil": "2024-12-31"    // optional: YYYY-MM-DD
 }
 ```
@@ -108,13 +110,17 @@
 {
   "operation": "grant",
   "username": "testuser",       // required
-  "permissions": ["SELECT", "INSERT"], // required: array of permissions
+  "permissions": ["SELECT", "INSERT"], // required: non-empty array of permissions
   "target": "users",            // required: object name
   "targetType": "table",        // required: "table" | "schema" | "database" | "sequence" | "function"
   "schema": "public",           // optional
   "withGrantOption": false      // optional
 }
 ```
+
+Role, schema, database, table, sequence, and function names are validated as simple PostgreSQL identifiers and then quoted. For `targetType: "function"`, provide the function name only; overloaded function signatures are not accepted by this safe grant/revoke path.
+
+Creating or altering a role with `superuser`, `createdb`, `createrole`, or `replication` set to `true` requires `--allow-destructive` in addition to `--security-mode admin`. Grants that include `ALL`, `TRUNCATE`, or `withGrantOption: true` also require destructive opt-in because they broaden or delegate future database permissions.
 
 #### Other User Operations
 ```json
@@ -152,11 +158,13 @@
 }
 ```
 
+`explain` accepts one read-only `SELECT`, `WITH`, `VALUES`, or `TABLE` statement without semicolons and runs the EXPLAIN inside a read-only transaction. `analyze: true` runs `EXPLAIN ANALYZE`, which executes the supplied query and therefore requires `--security-mode unsafe --allow-destructive`.
+
 #### Get Slow Queries
 ```json
 {
   "operation": "get_slow_queries",
-  "limit": 10,                  // optional, defaults to 10
+  "limit": 10,                  // optional, defaults to 10, max 100
   "minDuration": 100,           // optional: minimum avg duration in ms
   "orderBy": "mean_time",       // optional: "mean_time" | "total_time" | "calls" | "cache_hit_ratio"
   "includeNormalized": true     // optional: include normalized query text
@@ -168,9 +176,11 @@
 // Get query statistics
 { "operation": "get_stats", "queryPattern": "SELECT", "minCalls": 5, "orderBy": "mean_time" }
 
-// Reset query statistics  
+// Reset query statistics
 { "operation": "reset_stats", "queryId": "12345" } // queryId optional, resets all if omitted
 ```
+
+`reset_stats` changes `pg_stat_statements` state and is treated as destructive. `queryId` must be a numeric pg_stat_statements query ID.
 
 ---
 
@@ -188,10 +198,15 @@
   "unique": false,              // optional
   "concurrent": false,          // optional: create concurrently
   "method": "btree",            // optional: "btree" | "hash" | "gist" | "spgist" | "gin" | "brin"
-  "where": "email IS NOT NULL", // optional: partial index condition
+  "where": {                    // optional: structured partial index predicate
+    "email": { "isNull": false },
+    "active": true
+  },
   "ifNotExists": false          // optional
 }
 ```
+
+Partial-index `where` supports the same structured operators as mutation filters. Legacy string `where` clauses are rejected. Use `rawWhere` only for trusted local/admin partial-index predicates; it is classified as arbitrary SQL and requires `--security-mode unsafe --allow-destructive`.
 
 #### Other Index Operations
 ```json
@@ -238,6 +253,8 @@
 { "operation": "drop", "functionName": "old_func", "parameters": "INT, TEXT", "ifExists": true, "cascade": false }
 ```
 
+Function names are restricted to simple PostgreSQL identifiers and quoted by the server. Function `parameters`, `returnType`, and `functionBody` are raw SQL/code inputs; creating functions is classified as arbitrary SQL and requires `--security-mode unsafe --allow-destructive`. Drop signatures accept only comma-separated simple type names.
+
 ---
 
 ### Triggers Management
@@ -251,13 +268,15 @@
   "tableName": "users",            // required
   "functionName": "audit_function", // required
   "timing": "AFTER",               // optional: "BEFORE" | "AFTER" | "INSTEAD OF"
-  "events": ["INSERT", "UPDATE"],  // optional: array of "INSERT" | "UPDATE" | "DELETE" | "TRUNCATE"
+  "events": ["INSERT", "UPDATE"],  // optional: non-empty array of "INSERT" | "UPDATE" | "DELETE" | "TRUNCATE"
   "forEach": "ROW",                // optional: "ROW" | "STATEMENT"
-  "when": "NEW.active = true",     // optional: WHEN condition
+  "when": "NEW.active = true",     // optional: raw WHEN condition; requires unsafe mode
   "schema": "public",              // optional
   "replace": false                 // optional
 }
 ```
+
+Trigger, table, and function names are restricted to simple PostgreSQL identifiers and quoted by the server. Trigger `when` is a raw SQL expression; using it is classified as arbitrary SQL and requires `--security-mode unsafe --allow-destructive`.
 
 #### Other Trigger Operations
 ```json
@@ -282,9 +301,9 @@
   "operation": "create_fk",
   "constraintName": "fk_user_id",   // required
   "tableName": "orders",            // required
-  "columnNames": ["user_id"],       // required
+  "columnNames": ["user_id"],       // required: non-empty
   "referencedTable": "users",       // required
-  "referencedColumns": ["id"],      // required
+  "referencedColumns": ["id"],      // required: non-empty
   "schema": "public",               // optional
   "referencedSchema": "public",     // optional
   "onDelete": "CASCADE",            // optional: "NO ACTION" | "RESTRICT" | "CASCADE" | "SET NULL" | "SET DEFAULT"
@@ -300,12 +319,13 @@
   "operation": "create",
   "constraintName": "unique_email", // required
   "tableName": "users",            // required
-  "constraintType": "unique",      // required: "unique" | "check" | "primary_key"
-  "columnNames": ["email"],        // required for unique/primary_key
-  "checkExpression": "email LIKE '%@%'", // required for check constraints
+  "constraintTypeCreate": "unique", // required: "unique" | "check" | "primary_key"
+  "columnNames": ["email"],        // required and non-empty for unique/primary_key
   "schema": "public"               // optional
 }
 ```
+
+`checkExpression` is raw SQL by nature and is therefore treated as unsafe by the server policy. Creating CHECK constraints requires `--security-mode unsafe --allow-destructive`.
 
 #### Other Constraint Operations
 ```json
@@ -348,6 +368,8 @@
 }
 ```
 
+Policy, table, and role names are restricted to simple PostgreSQL identifiers and quoted by the server. RLS `using` and `check` are raw SQL policy expressions; creating policies or editing those expressions is classified as arbitrary SQL and requires `--security-mode unsafe --allow-destructive`.
+
 #### Other RLS Operations
 ```json
 // List policies
@@ -374,11 +396,13 @@
   "operation": "select",
   "query": "SELECT * FROM users WHERE active = $1", // required: SELECT query
   "parameters": [true],         // optional: parameters for $1, $2, etc.
-  "limit": 100,                 // optional: safety limit on rows
+  "limit": 100,                 // optional: select row limit, default 100, max 1000
   "timeout": 30000,             // optional: query timeout in ms
   "connectionString": "postgresql://..." // optional if env var set
 }
 ```
+
+`select` operations are wrapped in a bounded outer query and always receive a row limit. `count` and `exists` evaluate the provided SELECT without applying the select row limit.
 
 #### Count Rows
 ```json
@@ -417,6 +441,7 @@
   },
   "schema": "public",           // optional: defaults to "public"
   "returning": "*",             // optional: RETURNING clause
+  "maxReturningRows": 100,      // optional: RETURNING rows in response, default 100, max 1000
   "connectionString": "postgresql://..." // optional if env var set
 }
 ```
@@ -430,9 +455,10 @@
     "name": "Jane Doe",
     "updated_at": "NOW()"
   },
-  "where": "id = 123",          // required: WHERE clause (without WHERE)
+  "where": { "id": 123 },       // required: structured WHERE predicate
   "schema": "public",           // optional
-  "returning": "id, name, updated_at" // optional
+  "returning": ["id", "name", "updated_at"], // optional
+  "maxReturningRows": 100       // optional: response output cap
 }
 ```
 
@@ -441,10 +467,29 @@
 {
   "operation": "delete",
   "table": "users",             // required
-  "where": "active = false AND last_login < '2023-01-01'", // required
+  "where": {
+    "active": false,
+    "last_login": { "lt": "2023-01-01" }
+  },
   "schema": "public"            // optional
 }
 ```
+
+#### Structured WHERE Predicates
+```json
+{
+  "where": {
+    "id": 123,
+    "status": { "in": ["active", "pending"] },
+    "created_at": { "gte": "2024-01-01" },
+    "deleted_at": { "isNull": true }
+  }
+}
+```
+
+Supported operators: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `in`, and `isNull`.
+
+Legacy string `where` clauses are rejected. Use `rawWhere` only for trusted local/admin filters; it is treated as an unsafe SQL fragment by the server security policy and requires `--security-mode unsafe --allow-destructive`.
 
 #### Upsert (INSERT ... ON CONFLICT)
 ```json
@@ -457,9 +502,12 @@
     "last_seen": "NOW()"
   },
   "conflictColumns": ["email"], // required: columns for ON CONFLICT
-  "returning": "*"              // optional
+  "returning": "*",             // optional
+  "maxReturningRows": 100       // optional: response output cap
 }
 ```
+
+`maxReturningRows` limits only the MCP response payload. The database mutation still runs normally, and `Rows affected` reports PostgreSQL `rowCount`.
 
 ---
 
@@ -473,6 +521,7 @@
   "sql": "CREATE INDEX CONCURRENTLY idx_users_email ON users(email)", // required
   "expectRows": false,          // optional: whether to expect rows back
   "timeout": 60000,             // optional: timeout in ms
+  "maxRows": 100,               // optional: result rows in response, default 100, max 1000
   "transactional": false,       // optional: wrap in transaction
   "connectionString": "postgresql://..." // optional if env var set
 }
@@ -484,15 +533,20 @@
   "sql": "WITH recent_users AS (SELECT * FROM users WHERE created_at > $1) SELECT COUNT(*) FROM recent_users",
   "parameters": ["2024-01-01"], // optional: parameters for $1, $2, etc.
   "expectRows": true,
-  "timeout": 30000
+  "timeout": 30000,
+  "maxRows": 100
 }
 ```
+
+`maxRows` limits only the rows included in the MCP response. It does not rewrite arbitrary SQL or reduce database work.
+
+Multi-statement arbitrary SQL must use `transactional: true`, `expectRows: false`, and no `parameters`. Use a single parameterized statement, for example a CTE, when bind parameters are needed.
 
 #### Transactional Operation
 ```json
 {
-  "sql": "UPDATE accounts SET balance = balance - 100 WHERE id = $1; UPDATE accounts SET balance = balance + 100 WHERE id = $2;",
-  "parameters": [1, 2],
+  "sql": "WITH debit AS (UPDATE accounts SET balance = balance - $1 WHERE id = $2 RETURNING id) UPDATE accounts SET balance = balance + $1 WHERE id = $3",
+  "parameters": [100, 1, 2],
   "transactional": true,        // wraps in BEGIN/COMMIT
   "expectRows": false
 }
@@ -533,9 +587,13 @@
   "objectName": "users",        // required
   "comment": "Main user account information table", // required
   "schema": "public",           // optional, defaults to "public"
-  "columnName": "created_at"    // required when objectType is "column"
+  "columnName": "created_at",   // required when objectType is "column"
+  "tableName": "users",         // required when objectType is "constraint" or "trigger"
+  "functionSignature": ""       // optional for function comments; use "" for no arguments
 }
 ```
+
+Comment targets are restricted to simple PostgreSQL identifiers and quoted by the server. Comment text is escaped as a SQL literal. Function comment signatures accept only comma-separated simple type names.
 
 #### Remove Comment
 ```json
@@ -597,7 +655,8 @@
 
 ```json
 {
-  "analysisType": "performance",   // required: "configuration" | "performance" | "security"
+  "analysisType": "performance",   // optional, defaults to "configuration": "configuration" | "performance" | "security"
+  "schema": "public",              // optional, defaults to "public"; schema to inspect for table-size diagnostics
   "connectionString": "postgresql://..." // optional if env var set
 }
 ```
@@ -624,10 +683,11 @@
 ```json
 {
   "tableName": "users",           // required
-  "outputPath": "/path/to/file.json", // required: absolute path
+  "schema": "public",             // optional, defaults to "public"
+  "outputPath": "exports/users.json", // required: path under POSTGRES_MCP_WORKSPACE_DIR
   "format": "json",               // optional: "json" | "csv"
-  "limit": 1000,                  // optional: row limit
-  "where": "active = true",       // optional: WHERE clause
+  "limit": 1000,                  // optional: export row limit, default 1000, max 100000
+  "where": { "active": true },    // optional: structured filter
   "connectionString": "postgresql://..." // optional
 }
 ```
@@ -636,7 +696,8 @@
 ```json
 {
   "tableName": "users",           // required
-  "inputPath": "/path/to/file.json", // required: absolute path
+  "schema": "public",             // optional, defaults to "public"
+  "inputPath": "imports/users.json", // required: path under POSTGRES_MCP_WORKSPACE_DIR
   "format": "json",               // optional: "json" | "csv"
   "delimiter": ",",               // optional: for CSV
   "truncateFirst": false,         // optional: clear table first
@@ -649,15 +710,21 @@
 ### Copy Between Databases
 **Tool:** `pg_copy_between_databases`
 
+This tool necessarily takes `sourceConnectionString` and `targetConnectionString`; the server must be started with `--allow-tool-connection-string` or `POSTGRES_MCP_ALLOW_TOOL_CONNECTION_STRING=true` for those per-tool connection arguments to be accepted.
+
 ```json
 {
   "sourceConnectionString": "postgresql://source...", // required
   "targetConnectionString": "postgresql://target...", // required
   "tableName": "users",           // required
-  "where": "created_at > '2024-01-01'", // optional: filter condition
+  "schema": "public",             // optional, defaults to "public"; used for both source and target
+  "where": { "created_at": { "gt": "2024-01-01" } }, // optional structured filter
+  "limit": 1000,                  // optional: copied row limit, default 1000, max 100000
   "truncateTarget": false         // optional: clear target table first
 }
 ```
+
+Export/import paths are sandboxed to `POSTGRES_MCP_WORKSPACE_DIR` or `--workspace-dir`, must use `.json` or `.csv`, and are limited by `POSTGRES_MCP_MAX_FILE_BYTES` or `--max-file-bytes` (default: 10485760). JSON imports must be arrays of objects. Exports and copy-between-databases always use row limits (default: 1000, max: 100000). Legacy string `where` clauses are rejected. Use `rawWhere` only for trusted local/admin filters; it is classified as arbitrary SQL and requires `--security-mode unsafe --allow-destructive`.
 
 ---
 
@@ -705,6 +772,10 @@ postgresql://user:pass@localhost:5432/mydb?application_name=mcp-server&connect_t
 
 **Environment Variable:** `POSTGRES_CONNECTION_STRING`
 
+Per-tool connection string arguments are visible in schemas for compatibility, but the server rejects them by default. Enable them only for trusted local/admin workflows with `--allow-tool-connection-string` or `POSTGRES_MCP_ALLOW_TOOL_CONNECTION_STRING=true`.
+Explicit per-tool, CLI, and `POSTGRES_CONNECTION_STRING` values must be non-empty strings. Blank higher-priority connection strings fail validation instead of falling back to lower-priority sources.
+Connection target allowlists can be configured with repeated `--allowed-connection-target`, the tools config `allowedConnectionTargets` array, or comma-separated `POSTGRES_MCP_ALLOWED_CONNECTION_TARGETS`. Patterns use `[user@]host[:port][/database]`; omitted fields are unconstrained and `*` is accepted only as a full-field wildcard.
+
 ---
 
 ## Common Parameter Patterns
@@ -726,6 +797,17 @@ postgresql://user:pass@localhost:5432/mydb?application_name=mcp-server&connect_t
 - Provide corresponding values in the `parameters` array
 - This prevents SQL injection attacks
 
+### Security Policy Defaults
+- The server defaults to `readonly` mode.
+- Mutations require `--security-mode write` or higher.
+- DDL, role, RLS, filesystem import/export, and migration-style tools require `--security-mode admin` or higher.
+- Arbitrary SQL through `pg_execute_sql` requires `--security-mode unsafe`.
+- Destructive operations such as drops, resets, and arbitrary SQL also require `--allow-destructive`.
+- Per-tool connection string arguments are disabled unless `--allow-tool-connection-string` or `POSTGRES_MCP_ALLOW_TOOL_CONNECTION_STRING=true` is set.
+- Connection target allowlists apply to both server-level and per-tool connection strings before database access.
+- Security-boundary denials emit sanitized `[MCP Audit]` JSON lines on stderr without raw SQL, full request payloads, or connection-string passwords.
+- Default runtime timeouts can be configured with `--statement-timeout-ms`, `--query-timeout-ms`, `POSTGRES_MCP_STATEMENT_TIMEOUT_MS`, `POSTGRES_MCP_QUERY_TIMEOUT_MS`, or the tools config keys `statementTimeoutMs` and `queryTimeoutMs`.
+
 ### Pagination & Safety Limits
 - Query tools support `limit` parameter for safety (default varies)
 - Meta-tools that return lists often support pagination
@@ -739,26 +821,14 @@ postgresql://user:pass@localhost:5432/mydb?application_name=mcp-server&connect_t
 
 ## Error Handling
 
-All tools return structured error information:
+MCP tool calls return text content with `isError: true` for validation, policy, connection, and database failures. Error messages are sanitized before they cross the server boundary: credentials, SQL literals, and sensitive diagnostic SQL text are redacted where possible.
 
-```json
-{
-  "error": "Descriptive error message",
-  "code": "POSTGRES_ERROR_CODE",
-  "details": { /* additional context */ }
-}
-```
-
-**Common Error Codes:**
-- `CONNECTION_ERROR` - Database connection issues
-- `INVALID_PARAMETER` - Missing or invalid parameters  
-- `PERMISSION_DENIED` - Insufficient database privileges
-- `OBJECT_NOT_FOUND` - Referenced object doesn't exist
-- `SYNTAX_ERROR` - Invalid SQL syntax
-- `TIMEOUT_ERROR` - Query exceeded timeout limit (enhancement tools)
-- `TRANSACTION_ERROR` - Transaction rollback or failure (execute SQL)
-- `CONSTRAINT_VIOLATION` - Data violates constraints (mutations)
+Common failure categories:
+- Input validation failures, including missing required fields and unknown fields
+- Security policy denials, such as write tools in `readonly` mode or arbitrary SQL without `unsafe` mode
+- Connection resolution and database connection failures
+- PostgreSQL syntax, permission, timeout, transaction, and constraint failures
 
 ---
 
-*Need more examples? Check the [examples/](./examples/) directory for complete working scenarios.* 
+*Need more examples? Check the [examples/](./examples/) directory for complete working scenarios.*

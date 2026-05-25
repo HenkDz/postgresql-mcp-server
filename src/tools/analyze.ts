@@ -1,6 +1,5 @@
 import { DatabaseConnection } from '../utils/connection.js';
 import type { PostgresTool, GetConnectionStringFn, ToolOutput } from '../types/tool.js';
-import { analyzeDatabase as originalAnalyzeDatabase } from './analyze.js'; // Assuming it's from a .js file initially
 import { z } from 'zod';
 
 interface AnalysisResult {
@@ -10,9 +9,17 @@ interface AnalysisResult {
     connections: number;
     activeQueries: number;
     cacheHitRatio: number;
+    tableSizesSchema: string;
     tableSizes: Record<string, string>;
+    tableSizesCapped?: boolean;
   };
   recommendations: string[];
+}
+
+const TABLE_SIZE_DIAGNOSTIC_LIMIT = 100;
+
+function formatValidationError(error: z.ZodError): string {
+  return error.errors.map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`).join(', ');
 }
 
 // Definition previously in TOOL_DEFINITIONS
@@ -22,27 +29,29 @@ const toolDefinition = {
   inputSchema: z.object({
     connectionString: z.string().optional()
       .describe('PostgreSQL connection string (optional if POSTGRES_CONNECTION_STRING environment variable or --connection-string CLI option is set)'),
+    schema: z.string().optional().default('public')
+      .describe('Schema to inspect for table-size diagnostics'),
     analysisType: z.enum(['configuration', 'performance', 'security']).optional()
       .describe('Type of analysis to perform')
-  })
+  }).strict()
 };
 
 export const analyzeDatabaseTool: PostgresTool = {
   name: toolDefinition.name,
   description: toolDefinition.description,
   inputSchema: toolDefinition.inputSchema,
-  execute: async (args: { connectionString?: string; analysisType?: 'configuration' | 'performance' | 'security'; }, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> => {
-    const { connectionString: connStringArg, analysisType } = args;
-
-    if (!analysisType || !['configuration', 'performance', 'security'].includes(analysisType)) {
-        return {
-            content: [{ type: 'text', text: 'Error: analysisType is required and must be one of [\'configuration\', \'performance\', \'security\'].' }],
-            isError: true,
-        };
+  execute: async (args: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> => {
+    const validationResult = toolDefinition.inputSchema.safeParse(args);
+    if (!validationResult.success) {
+      return {
+        content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }],
+        isError: true,
+      };
     }
 
+    const { connectionString: connStringArg, analysisType = 'configuration', schema } = validationResult.data;
     const resolvedConnString = getConnectionString(connStringArg);
-    const result = await originalAnalyzeDatabase(resolvedConnString, analysisType);
+    const result = await analyzeDatabase(resolvedConnString, analysisType, schema);
     
     return {
       content: [
@@ -57,15 +66,16 @@ export const analyzeDatabaseTool: PostgresTool = {
 
 export async function analyzeDatabase(
   connectionString: string,
-  analysisType: 'configuration' | 'performance' | 'security' = 'configuration'
+  analysisType: 'configuration' | 'performance' | 'security' = 'configuration',
+  schema = 'public'
 ): Promise<AnalysisResult> {
   const db = DatabaseConnection.getInstance();
-  await db.connect(connectionString);
 
   try {
+    await db.connect(connectionString);
     const version = await getVersion();
     const settings = await getSettings();
-    const metrics = await getMetrics();
+    const metrics = await getMetrics(schema);
     const recommendations = await generateRecommendations(analysisType, settings, metrics);
 
     return {
@@ -98,7 +108,7 @@ async function getSettings(): Promise<Record<string, string>> {
   }, {});
 }
 
-async function getMetrics(): Promise<AnalysisResult['metrics']> {
+async function getMetrics(schema = 'public'): Promise<AnalysisResult['metrics']> {
   const db = DatabaseConnection.getInstance();
 
   const connections = await db.query<{ count: string }>(
@@ -109,19 +119,6 @@ async function getMetrics(): Promise<AnalysisResult['metrics']> {
     "SELECT count(*) FROM pg_stat_activity WHERE state = 'active'"
   );
 
-  // First get raw stats for diagnostic logging
-  const rawStats = await db.query<{ datname: string; hits: number; reads: number }>(
-    `SELECT
-      datname,
-      COALESCE(blks_hit, 0) as hits,
-      COALESCE(blks_read, 0) as reads
-    FROM pg_stat_database
-    WHERE datname = current_database()`
-  );
-
-  console.error('Cache stats:', rawStats[0]); // Diagnostic logging
-
-  // Then calculate ratio with additional safety checks
   const cacheHit = await db.query<{ ratio: number }>(
     `WITH stats AS (
       SELECT
@@ -155,24 +152,31 @@ async function getMetrics(): Promise<AnalysisResult['metrics']> {
     ratio = 0;
   }
 
-  console.error('Calculated ratio:', ratio); // Diagnostic logging
-
   const tableSizes = await db.query<{ tablename: string; size: string }>(
-    `SELECT 
-      tablename,
-      pg_size_pretty(pg_table_size(schemaname || '.' || tablename)) as size
-    FROM pg_tables 
-    WHERE schemaname = 'public'`
+    `SELECT
+      c.relname AS tablename,
+      pg_size_pretty(pg_table_size(c.oid)) as size
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = $1
+      AND c.relkind IN ('r', 'p')
+    ORDER BY pg_table_size(c.oid) DESC
+    LIMIT $2`,
+    [schema, TABLE_SIZE_DIAGNOSTIC_LIMIT + 1]
   );
+  const visibleTableSizes = tableSizes.slice(0, TABLE_SIZE_DIAGNOSTIC_LIMIT);
+  const tableSizesCapped = tableSizes.length > TABLE_SIZE_DIAGNOSTIC_LIMIT;
 
   return {
     connections: Number.parseInt(connections[0].count),
     activeQueries: Number.parseInt(activeQueries[0].count),
     cacheHitRatio: Number.parseFloat(ratio.toFixed(2)),
-    tableSizes: tableSizes.reduce((acc: Record<string, string>, row: { tablename: string; size: string }) => {
+    tableSizesSchema: schema,
+    tableSizes: visibleTableSizes.reduce((acc: Record<string, string>, row: { tablename: string; size: string }) => {
       acc[row.tablename] = row.size;
       return acc;
     }, {}),
+    tableSizesCapped,
   };
 }
 
@@ -184,6 +188,10 @@ async function generateRecommendations(
   const recommendations: string[] = [];
 
   if (type === 'configuration' || type === 'performance') {
+    if (metrics.tableSizesCapped) {
+      recommendations.push(`Table size diagnostics are capped at the largest ${TABLE_SIZE_DIAGNOSTIC_LIMIT} tables in schema "${metrics.tableSizesSchema}"`);
+    }
+
     if (metrics.cacheHitRatio < 0.99) {
       recommendations.push('Consider increasing shared_buffers to improve cache hit ratio');
     }
