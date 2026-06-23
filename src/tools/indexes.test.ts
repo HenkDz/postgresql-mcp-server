@@ -89,6 +89,54 @@ describe('manageIndexesTool', () => {
     expect(output).not.toContain('raw-index-secret');
   });
 
+  it('uses pg_stat_user_indexes column names for stats lookups', async () => {
+    const mockDb = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      query: vi.fn().mockResolvedValue([]),
+      disconnect: vi.fn().mockResolvedValue(undefined)
+    };
+    vi.spyOn(DatabaseConnection, 'getInstance').mockReturnValue(mockDb as unknown as DatabaseConnection);
+
+    const result = await manageIndexesTool.execute({
+      operation: 'get',
+      tableName: 'sessions'
+    }, mockGetConnectionString);
+
+    const query = mockDb.query.mock.calls[0][0] as string;
+    expect(result.isError).toBeUndefined();
+    expect(query).toContain('psi.relname AS tablename');
+    expect(query).toContain('psi.indexrelname AS indexname');
+    expect(query).toContain('pg_relation_size(psi.indexrelid)');
+    expect(query).toContain('AND psi.relname = $2');
+  });
+
+  it('uses pg_stat_user_indexes column names for usage analysis', async () => {
+    const mockDb = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      query: vi.fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValue({ formatted: '0 bytes' }),
+      disconnect: vi.fn().mockResolvedValue(undefined)
+    };
+    vi.spyOn(DatabaseConnection, 'getInstance').mockReturnValue(mockDb as unknown as DatabaseConnection);
+
+    const result = await manageIndexesTool.execute({
+      operation: 'analyze_usage',
+      tableName: 'sessions'
+    }, mockGetConnectionString);
+
+    const usageQuery = mockDb.query.mock.calls[0][0] as string;
+    const duplicateQuery = mockDb.query.mock.calls[1][0] as string;
+    expect(result.isError).toBeUndefined();
+    expect(usageQuery).toContain('psi.relname AS tablename');
+    expect(usageQuery).toContain('psi.indexrelname AS indexname');
+    expect(usageQuery).toContain('AND psi.relname = $2');
+    expect(usageQuery).toContain('AND NOT pi.indisprimary');
+    expect(duplicateQuery).toContain('array_agg(psi.indexrelname)');
+    expect(duplicateQuery).toContain('GROUP BY psi.schemaname, psi.relname, pi.indkey');
+  });
+
   it('rejects legacy string partial-index predicates before connecting', async () => {
     const mockDb = {
       connect: vi.fn().mockResolvedValue(undefined),

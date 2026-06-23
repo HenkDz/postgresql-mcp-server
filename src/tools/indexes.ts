@@ -87,24 +87,24 @@ async function executeGetIndexes(
     if (includeStats) {
       const statsQuery = `
         SELECT 
-          schemaname,
-          tablename,
-          indexname,
-          idx_scan as scans,
-          idx_tup_read as tuples_read,
-          idx_tup_fetch as tuples_fetched,
-          pg_relation_size(indexrelname::regclass) as size_bytes,
-          pg_size_pretty(pg_relation_size(indexrelname::regclass)) as size_pretty,
-          indisunique as is_unique,
-          indisprimary as is_primary,
+          psi.schemaname,
+          psi.relname AS tablename,
+          psi.indexrelname AS indexname,
+          psi.idx_scan as scans,
+          psi.idx_tup_read as tuples_read,
+          psi.idx_tup_fetch as tuples_fetched,
+          pg_relation_size(psi.indexrelid) as size_bytes,
+          pg_size_pretty(pg_relation_size(psi.indexrelid)) as size_pretty,
+          pi.indisunique as is_unique,
+          pi.indisprimary as is_primary,
           CASE 
-            WHEN idx_scan = 0 THEN 0
-            ELSE round((idx_tup_fetch::numeric / idx_tup_read::numeric) * 100, 2)
+            WHEN psi.idx_scan = 0 THEN 0
+            ELSE round((psi.idx_tup_fetch::numeric / NULLIF(psi.idx_tup_read::numeric, 0)) * 100, 2)
           END as usage_ratio
         FROM pg_stat_user_indexes psi
         JOIN pg_index pi ON psi.indexrelid = pi.indexrelid
-        WHERE schemaname = $1 
-          ${tableName ? 'AND tablename = $2' : ''}
+        WHERE psi.schemaname = $1 
+          ${tableName ? 'AND psi.relname = $2' : ''}
         ORDER BY size_bytes DESC, scans DESC
       `;
       
@@ -413,26 +413,26 @@ async function executeAnalyzeIndexUsage(
     // Get all index usage stats
     const usageQuery = `
       SELECT 
-        schemaname,
-        tablename,
-        indexname,
-        idx_scan as scans,
-        idx_tup_read as tuples_read,
-        idx_tup_fetch as tuples_fetched,
-        pg_relation_size(indexrelname::regclass) as size_bytes,
-        pg_size_pretty(pg_relation_size(indexrelname::regclass)) as size_pretty,
-        indisunique as is_unique,
-        indisprimary as is_primary,
+        psi.schemaname,
+        psi.relname AS tablename,
+        psi.indexrelname AS indexname,
+        psi.idx_scan as scans,
+        psi.idx_tup_read as tuples_read,
+        psi.idx_tup_fetch as tuples_fetched,
+        pg_relation_size(psi.indexrelid) as size_bytes,
+        pg_size_pretty(pg_relation_size(psi.indexrelid)) as size_pretty,
+        pi.indisunique as is_unique,
+        pi.indisprimary as is_primary,
         CASE 
-          WHEN idx_scan = 0 THEN 0
-          ELSE round((idx_tup_fetch::numeric / NULLIF(idx_tup_read::numeric, 0)) * 100, 2)
+          WHEN psi.idx_scan = 0 THEN 0
+          ELSE round((psi.idx_tup_fetch::numeric / NULLIF(psi.idx_tup_read::numeric, 0)) * 100, 2)
         END as usage_ratio
       FROM pg_stat_user_indexes psi
       JOIN pg_index pi ON psi.indexrelid = pi.indexrelid
-      WHERE schemaname = $1 
-        ${tableName ? 'AND tablename = $2' : ''}
-        AND pg_relation_size(indexrelname::regclass) >= $${tableName ? '3' : '2'}
-        AND NOT indisprimary  -- Exclude primary key indexes from analysis
+      WHERE psi.schemaname = $1 
+        ${tableName ? 'AND psi.relname = $2' : ''}
+        AND pg_relation_size(psi.indexrelid) >= $${tableName ? '3' : '2'}
+        AND NOT pi.indisprimary
       ORDER BY size_bytes DESC
     `;
     
@@ -448,17 +448,17 @@ async function executeAnalyzeIndexUsage(
       // Find potentially duplicate indexes by comparing column definitions
       const duplicateQuery = `
         SELECT 
-          schemaname,
-          tablename,
-          array_agg(indexname) as index_names,
-          string_agg(pg_get_indexdef(indexrelid), ' | ') as definitions,
+          psi.schemaname,
+          psi.relname AS tablename,
+          array_agg(psi.indexrelname) as index_names,
+          string_agg(pg_get_indexdef(psi.indexrelid), ' | ') as definitions,
           count(*) as index_count
         FROM pg_stat_user_indexes psi
         JOIN pg_index pi ON psi.indexrelid = pi.indexrelid
-        WHERE schemaname = $1 
-          ${tableName ? 'AND tablename = $2' : ''}
-          AND NOT indisprimary
-        GROUP BY schemaname, tablename, indkey
+        WHERE psi.schemaname = $1 
+          ${tableName ? 'AND psi.relname = $2' : ''}
+          AND NOT pi.indisprimary
+        GROUP BY psi.schemaname, psi.relname, pi.indkey
         HAVING count(*) > 1
       `;
       
