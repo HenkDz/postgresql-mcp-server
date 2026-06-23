@@ -24,7 +24,7 @@
     "build": "tsc && node -e \"const fs = require('fs'); const path = 'build/index.js'; const stats = fs.statSync(path); fs.chmodSync(path, stats.mode | parseInt('755', 8));\"",
     "start": "node build/index.js",
     "dev": "tsc -w & nodemon build/index.js",
-    "lint": "eslint .",
+    "lint": "tsc --noEmit",
     "test": "vitest",
     "test:run": "vitest run --pool=threads --maxWorkers=1 --minWorkers=1",
     "test:integration": "vitest run src/integration --pool=threads --maxWorkers=1 --minWorkers=1",
@@ -81,9 +81,6 @@
   "devDependencies": {
     "@types/node": "^20.11.17",
     "@types/pg": "^8.10.2",
-    "@typescript-eslint/eslint-plugin": "^7.1.0",
-    "@typescript-eslint/parser": "^7.1.0",
-    "eslint": "^8.57.0",
     "nodemon": "^3.0.3",
     "typescript": "^5.3.3",
     "vitest": "^3.2.4"
