@@ -17,6 +17,21 @@ describe('connection target allowlist helpers', () => {
     });
   });
 
+  it('normalizes bracketed IPv6 URL hosts before allowlist matching', () => {
+    const allowedTargets = normalizeAllowedConnectionTargets(['readonly@[::1]:5432/app']);
+
+    expect(parseConnectionTarget('postgresql://readonly:secret@[::1]:5432/app')).toEqual({
+      host: '::1',
+      port: '5432',
+      database: 'app',
+      user: 'readonly'
+    });
+    expect(() => assertConnectionTargetAllowed(
+      'postgresql://readonly:secret@[::1]:5432/app',
+      allowedTargets
+    )).not.toThrow();
+  });
+
   it('parses keyword-style connection targets', () => {
     expect(parseConnectionTarget("host=db.internal port=5432 dbname=app user='read only' password=secret")).toEqual({
       host: 'db.internal',

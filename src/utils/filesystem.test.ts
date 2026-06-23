@@ -16,6 +16,15 @@ async function makeWorkspace(): Promise<string> {
   return fs.promises.mkdtemp(path.join(os.tmpdir(), 'postgres-mcp-fs-'));
 }
 
+async function trySymlink(target: string, linkPath: string, type: fs.symlink.Type): Promise<boolean> {
+  try {
+    await fs.promises.symlink(target, linkPath, process.platform === 'win32' && type === 'dir' ? 'junction' : type);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe('filesystem sandbox helpers', () => {
   afterEach(async () => {
     if (originalWorkspace === undefined) {
@@ -60,6 +69,32 @@ describe('filesystem sandbox helpers', () => {
     process.env.POSTGRES_MCP_WORKSPACE_DIR = workspace;
 
     expect(() => resolveSandboxPath('../outside.json', 'json')).toThrow('outside POSTGRES_MCP_WORKSPACE_DIR');
+  });
+
+  it('rejects existing file symlinks that resolve outside the configured workspace', async () => {
+    const workspace = await makeWorkspace();
+    const outside = await makeWorkspace();
+    const outsideFile = path.join(outside, 'secret.json');
+    const linkPath = path.join(workspace, 'secret.json');
+    await fs.promises.writeFile(outsideFile, '[{}]');
+    if (!await trySymlink(outsideFile, linkPath, 'file')) {
+      return;
+    }
+    process.env.POSTGRES_MCP_WORKSPACE_DIR = workspace;
+
+    expect(() => resolveSandboxPath('secret.json', 'json')).toThrow(/outside POSTGRES_MCP_WORKSPACE_DIR|unresolved target/);
+  });
+
+  it('rejects parent directory symlinks that resolve outside the configured workspace', async () => {
+    const workspace = await makeWorkspace();
+    const outside = await makeWorkspace();
+    const linkPath = path.join(workspace, 'exports');
+    if (!await trySymlink(outside, linkPath, 'dir')) {
+      return;
+    }
+    process.env.POSTGRES_MCP_WORKSPACE_DIR = workspace;
+
+    expect(() => resolveSandboxPath('exports/users.json', 'json')).toThrow('outside POSTGRES_MCP_WORKSPACE_DIR');
   });
 
   it('enforces extensions and requested formats', async () => {

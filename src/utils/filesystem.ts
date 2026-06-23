@@ -29,15 +29,61 @@ export function getFileSandboxConfig(): FileSandboxConfig {
   }
 
   return {
-    workspaceDir: path.resolve(workspaceDir),
+    workspaceDir: fs.realpathSync(path.resolve(workspaceDir)),
     maxFileBytes: parseMaxFileBytes(process.env.POSTGRES_MCP_MAX_FILE_BYTES)
   };
 }
 
 function assertInsideWorkspace(resolvedPath: string, workspaceDir: string): void {
   const relativePath = path.relative(workspaceDir, resolvedPath);
-  if (relativePath === '' || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
     throw new Error(`Path "${resolvedPath}" is outside POSTGRES_MCP_WORKSPACE_DIR.`);
+  }
+}
+
+function isEnoent(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'ENOENT';
+}
+
+function realpathIfExists(resolvedPath: string): string | undefined {
+  try {
+    return fs.realpathSync(resolvedPath);
+  } catch (error) {
+    if (isEnoent(error)) {
+      return undefined;
+    }
+
+    throw error;
+  }
+}
+
+function assertNoDanglingSymlink(resolvedPath: string): void {
+  try {
+    if (fs.lstatSync(resolvedPath).isSymbolicLink()) {
+      throw new Error(`Path "${resolvedPath}" is a symlink with an unresolved target.`);
+    }
+  } catch (error) {
+    if (!isEnoent(error)) {
+      throw error;
+    }
+  }
+}
+
+function nearestExistingParentRealpath(resolvedPath: string): string {
+  let currentPath = path.dirname(resolvedPath);
+
+  while (true) {
+    const realPath = realpathIfExists(currentPath);
+    if (realPath) {
+      return realPath;
+    }
+
+    const parentPath = path.dirname(currentPath);
+    if (parentPath === currentPath) {
+      throw new Error(`Path "${resolvedPath}" has no existing parent directory.`);
+    }
+
+    currentPath = parentPath;
   }
 }
 
@@ -60,6 +106,14 @@ export function resolveSandboxPath(inputPath: string, expectedFormat?: 'json' | 
 
   assertInsideWorkspace(resolvedPath, config.workspaceDir);
   assertAllowedExtension(resolvedPath, expectedFormat);
+
+  const realResolvedPath = realpathIfExists(resolvedPath);
+  if (realResolvedPath) {
+    assertInsideWorkspace(realResolvedPath, config.workspaceDir);
+  } else {
+    assertNoDanglingSymlink(resolvedPath);
+    assertInsideWorkspace(nearestExistingParentRealpath(resolvedPath), config.workspaceDir);
+  }
 
   return resolvedPath;
 }

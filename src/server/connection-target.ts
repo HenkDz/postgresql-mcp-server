@@ -51,6 +51,11 @@ function normalizePortPattern(port: string | undefined, source: string): string 
   return normalized;
 }
 
+function normalizeConnectionHost(host: string): string {
+  const decoded = decodeURIComponent(host);
+  return (decoded.startsWith('[') && decoded.endsWith(']') ? decoded.slice(1, -1) : decoded).toLowerCase();
+}
+
 function splitHostAndPort(hostPort: string, source: string): { host: string; port?: string } {
   if (hostPort.startsWith('[')) {
     const closingBracket = hostPort.indexOf(']');
@@ -208,7 +213,7 @@ export function parseConnectionTarget(connectionString: string): ConnectionTarge
       }
 
       return {
-        host: decodeURIComponent(parsed.hostname).toLowerCase(),
+        host: normalizeConnectionHost(parsed.hostname),
         port: parsed.port || undefined,
         database: parsed.pathname && parsed.pathname !== '/' ? decodeURIComponent(parsed.pathname.slice(1)) : undefined,
         user: parsed.username ? decodeURIComponent(parsed.username) : undefined
@@ -228,7 +233,7 @@ export function parseConnectionTarget(connectionString: string): ConnectionTarge
     }
 
     return {
-      host: host.toLowerCase(),
+      host: normalizeConnectionHost(host),
       port: keywordFields.port || undefined,
       database: keywordFields.dbname || keywordFields.database || undefined,
       user: keywordFields.user || undefined
