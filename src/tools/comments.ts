@@ -1,7 +1,8 @@
-import { DatabaseConnection } from '../utils/connection.js';
+import { DatabaseConnection, sanitizeErrorMessage } from '../utils/connection.js';
 import { z } from 'zod';
 import type { PostgresTool, GetConnectionStringFn, ToolOutput } from '../types/tool.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+import { quoteIdent, quoteLiteral } from '../utils/sql.js';
 
 interface CommentInfo {
   objectType: string;
@@ -26,9 +27,11 @@ const ManageCommentsInputSchema = z.object({
   objectType: z.enum(['table', 'column', 'index', 'constraint', 'function', 'trigger', 'view', 'sequence', 'schema', 'database']).optional().describe('Type of database object (required for get/set/remove)'),
   objectName: z.string().optional().describe('Name of the object (required for get/set/remove)'),
   schema: z.string().optional().describe('Schema name (defaults to public, required for most object types)'),
-  
+  tableName: z.string().optional().describe('Parent table name (required when objectType is "constraint" or "trigger")'),
+
   // Column-specific parameters
   columnName: z.string().optional().describe('Column name (required when objectType is "column")'),
+  functionSignature: z.string().optional().describe('Function argument types for function comments, e.g. "integer, text" or empty for no arguments'),
   
   // Comment content
   comment: z.string().optional().describe('Comment text (required for set operation)'),
@@ -36,9 +39,72 @@ const ManageCommentsInputSchema = z.object({
   // Bulk get parameters
   includeSystemObjects: z.boolean().optional().describe('Include system objects in bulk_get (defaults to false)'),
   filterObjectType: z.enum(['table', 'column', 'index', 'constraint', 'function', 'trigger', 'view', 'sequence', 'schema', 'database']).optional().describe('Filter by object type in bulk_get operation')
-});
+}).strict();
 
 type ManageCommentsInput = z.infer<typeof ManageCommentsInputSchema>;
+
+function formatValidationError(error: z.ZodError): string {
+  return error.errors.map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`).join(', ');
+}
+
+function quoteSchemaObject(schema: string, objectName: string): string {
+  return `${quoteIdent(schema)}.${quoteIdent(objectName)}`;
+}
+
+function buildFunctionCommentSignature(signature?: string): string {
+  if (!signature || signature.trim() === '') {
+    return '()';
+  }
+
+  const normalizedSignature = signature.trim();
+  if (!/^[A-Za-z0-9_.,\s[\]]+$/.test(normalizedSignature)) {
+    throw new Error('Invalid function signature. Use a comma-separated list of simple PostgreSQL type names only.');
+  }
+
+  return `(${normalizedSignature})`;
+}
+
+function buildCommentTarget(input: ManageCommentsInput): string {
+  const { objectType, objectName, schema = 'public', columnName, tableName, functionSignature } = input;
+
+  if (!objectType || !objectName) {
+    throw new McpError(ErrorCode.InvalidParams, 'objectType and objectName are required');
+  }
+
+  switch (objectType) {
+    case 'table':
+      return `TABLE ${quoteSchemaObject(schema, objectName)}`;
+    case 'column':
+      if (!columnName) {
+        throw new McpError(ErrorCode.InvalidParams, 'columnName is required when objectType is "column"');
+      }
+      return `COLUMN ${quoteSchemaObject(schema, objectName)}.${quoteIdent(columnName)}`;
+    case 'index':
+      return `INDEX ${quoteSchemaObject(schema, objectName)}`;
+    case 'function':
+      return `FUNCTION ${quoteSchemaObject(schema, objectName)}${buildFunctionCommentSignature(functionSignature)}`;
+    case 'view':
+      return `VIEW ${quoteSchemaObject(schema, objectName)}`;
+    case 'sequence':
+      return `SEQUENCE ${quoteSchemaObject(schema, objectName)}`;
+    case 'schema':
+      return `SCHEMA ${quoteIdent(objectName)}`;
+    case 'database':
+      return `DATABASE ${quoteIdent(objectName)}`;
+    case 'constraint':
+      if (!tableName) {
+        throw new McpError(ErrorCode.InvalidParams, 'tableName is required when objectType is "constraint"');
+      }
+      return `CONSTRAINT ${quoteIdent(objectName)} ON ${quoteSchemaObject(schema, tableName)}`;
+    case 'trigger':
+      if (!tableName) {
+        throw new McpError(ErrorCode.InvalidParams, 'tableName is required when objectType is "trigger"');
+      }
+      return `TRIGGER ${quoteIdent(objectName)} ON ${quoteSchemaObject(schema, tableName)}`;
+    default:
+      throw new McpError(ErrorCode.InvalidParams, `Unsupported object type: ${objectType}`);
+  }
+}
 
 /**
  * Get comment for a specific database object
@@ -47,7 +113,6 @@ async function executeGetComment(
   input: ManageCommentsInput,
   getConnectionString: GetConnectionStringFn
 ): Promise<CommentInfo | null> {
-  const resolvedConnectionString = getConnectionString(input.connectionString);
   const db = DatabaseConnection.getInstance();
   const { objectType, objectName, schema = 'public', columnName } = input;
 
@@ -55,9 +120,14 @@ async function executeGetComment(
     throw new McpError(ErrorCode.InvalidParams, 'objectType and objectName are required for get operation');
   }
 
+  if (objectType === 'column' && !columnName) {
+    throw new McpError(ErrorCode.InvalidParams, 'columnName is required when objectType is "column"');
+  }
+
   try {
+    const resolvedConnectionString = getConnectionString(input.connectionString);
     await db.connect(resolvedConnectionString);
-    
+
     let query: string;
     let params: (string | undefined)[];
 
@@ -73,9 +143,6 @@ async function executeGetComment(
         break;
 
       case 'column':
-        if (!columnName) {
-          throw new McpError(ErrorCode.InvalidParams, 'columnName is required when objectType is "column"');
-        }
         query = `
           SELECT col_description(c.oid, a.attnum) AS comment
           FROM pg_class c
@@ -184,7 +251,10 @@ async function executeGetComment(
     };
 
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to get comment: ${error instanceof Error ? error.message : String(error)}`);
+    if (error instanceof McpError) {
+      throw error;
+    }
+    throw new McpError(ErrorCode.InternalError, `Failed to get comment: ${sanitizeErrorMessage(error)}`);
   } finally {
     await db.disconnect();
   }
@@ -196,8 +266,7 @@ async function executeGetComment(
 async function executeSetComment(
   input: ManageCommentsInput,
   getConnectionString: GetConnectionStringFn
-): Promise<{ objectType: string; objectName: string; schema?: string; columnName?: string; comment: string }> {
-  const resolvedConnectionString = getConnectionString(input.connectionString);
+): Promise<{ objectType: string; objectName: string; schema?: string; columnName?: string; commentSet: true }> {
   const db = DatabaseConnection.getInstance();
   const { objectType, objectName, schema = 'public', columnName, comment } = input;
 
@@ -206,60 +275,10 @@ async function executeSetComment(
   }
 
   try {
+    const sql = `COMMENT ON ${buildCommentTarget(input)} IS ${quoteLiteral(comment)}`;
+    const resolvedConnectionString = getConnectionString(input.connectionString);
+
     await db.connect(resolvedConnectionString);
-    
-    let sql: string;
-    const escapedComment = comment.replace(/'/g, "''"); // Escape single quotes
-
-    switch (objectType) {
-      case 'table':
-        sql = `COMMENT ON TABLE "${schema}"."${objectName}" IS '${escapedComment}'`;
-        break;
-
-      case 'column':
-        if (!columnName) {
-          throw new McpError(ErrorCode.InvalidParams, 'columnName is required when objectType is "column"');
-        }
-        sql = `COMMENT ON COLUMN "${schema}"."${objectName}"."${columnName}" IS '${escapedComment}'`;
-        break;
-
-      case 'index':
-        sql = `COMMENT ON INDEX "${schema}"."${objectName}" IS '${escapedComment}'`;
-        break;
-
-      case 'function':
-        // Note: This is simplified - in practice, you'd need to handle function overloads
-        sql = `COMMENT ON FUNCTION "${schema}"."${objectName}" IS '${escapedComment}'`;
-        break;
-
-      case 'view':
-        sql = `COMMENT ON VIEW "${schema}"."${objectName}" IS '${escapedComment}'`;
-        break;
-
-      case 'sequence':
-        sql = `COMMENT ON SEQUENCE "${schema}"."${objectName}" IS '${escapedComment}'`;
-        break;
-
-      case 'schema':
-        sql = `COMMENT ON SCHEMA "${objectName}" IS '${escapedComment}'`;
-        break;
-
-      case 'database':
-        sql = `COMMENT ON DATABASE "${objectName}" IS '${escapedComment}'`;
-        break;
-
-      case 'constraint':
-        sql = `COMMENT ON CONSTRAINT "${objectName}" ON "${schema}"."${objectName}" IS '${escapedComment}'`;
-        break;
-
-      case 'trigger':
-        // Note: PostgreSQL doesn't support COMMENT ON TRIGGER directly
-        throw new McpError(ErrorCode.InvalidParams, 'PostgreSQL does not support comments on triggers');
-
-      default:
-        throw new McpError(ErrorCode.InvalidParams, `Unsupported object type: ${objectType}`);
-    }
-
     await db.query(sql);
 
     return {
@@ -267,11 +286,14 @@ async function executeSetComment(
       objectName,
       schema: objectType !== 'database' && objectType !== 'schema' ? schema : undefined,
       columnName,
-      comment
+      commentSet: true
     };
 
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to set comment: ${error instanceof Error ? error.message : String(error)}`);
+    if (error instanceof McpError) {
+      throw error;
+    }
+    throw new McpError(ErrorCode.InternalError, `Failed to set comment: ${sanitizeErrorMessage(error)}`);
   } finally {
     await db.disconnect();
   }
@@ -284,7 +306,6 @@ async function executeRemoveComment(
   input: ManageCommentsInput,
   getConnectionString: GetConnectionStringFn
 ): Promise<{ objectType: string; objectName: string; schema?: string; columnName?: string }> {
-  const resolvedConnectionString = getConnectionString(input.connectionString);
   const db = DatabaseConnection.getInstance();
   const { objectType, objectName, schema = 'public', columnName } = input;
 
@@ -293,57 +314,10 @@ async function executeRemoveComment(
   }
 
   try {
+    const sql = `COMMENT ON ${buildCommentTarget(input)} IS NULL`;
+    const resolvedConnectionString = getConnectionString(input.connectionString);
+
     await db.connect(resolvedConnectionString);
-    
-    let sql: string;
-
-    switch (objectType) {
-      case 'table':
-        sql = `COMMENT ON TABLE "${schema}"."${objectName}" IS NULL`;
-        break;
-
-      case 'column':
-        if (!columnName) {
-          throw new McpError(ErrorCode.InvalidParams, 'columnName is required when objectType is "column"');
-        }
-        sql = `COMMENT ON COLUMN "${schema}"."${objectName}"."${columnName}" IS NULL`;
-        break;
-
-      case 'index':
-        sql = `COMMENT ON INDEX "${schema}"."${objectName}" IS NULL`;
-        break;
-
-      case 'function':
-        sql = `COMMENT ON FUNCTION "${schema}"."${objectName}" IS NULL`;
-        break;
-
-      case 'view':
-        sql = `COMMENT ON VIEW "${schema}"."${objectName}" IS NULL`;
-        break;
-
-      case 'sequence':
-        sql = `COMMENT ON SEQUENCE "${schema}"."${objectName}" IS NULL`;
-        break;
-
-      case 'schema':
-        sql = `COMMENT ON SCHEMA "${objectName}" IS NULL`;
-        break;
-
-      case 'database':
-        sql = `COMMENT ON DATABASE "${objectName}" IS NULL`;
-        break;
-
-      case 'constraint':
-        sql = `COMMENT ON CONSTRAINT "${objectName}" ON "${schema}"."${objectName}" IS NULL`;
-        break;
-
-      case 'trigger':
-        throw new McpError(ErrorCode.InvalidParams, 'PostgreSQL does not support comments on triggers');
-
-      default:
-        throw new McpError(ErrorCode.InvalidParams, `Unsupported object type: ${objectType}`);
-    }
-
     await db.query(sql);
 
     return {
@@ -354,7 +328,10 @@ async function executeRemoveComment(
     };
 
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to remove comment: ${error instanceof Error ? error.message : String(error)}`);
+    if (error instanceof McpError) {
+      throw error;
+    }
+    throw new McpError(ErrorCode.InternalError, `Failed to remove comment: ${sanitizeErrorMessage(error)}`);
   } finally {
     await db.disconnect();
   }
@@ -483,7 +460,7 @@ async function executeBulkGetComments(
     return comments;
 
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to get bulk comments: ${error instanceof Error ? error.message : String(error)}`);
+    throw new McpError(ErrorCode.InternalError, `Failed to get bulk comments: ${sanitizeErrorMessage(error)}`);
   } finally {
     await db.disconnect();
   }
@@ -497,9 +474,9 @@ export const manageCommentsTool: PostgresTool = {
   execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
     const validationResult = ManageCommentsInputSchema.safeParse(args);
     if (!validationResult.success) {
-      return { 
-        content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], 
-        isError: true 
+      return {
+        content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }],
+        isError: true
       };
     }
 
@@ -560,11 +537,11 @@ export const manageCommentsTool: PostgresTool = {
       }
 
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { 
         content: [{ type: 'text', text: `Error executing ${input.operation} operation: ${errorMessage}` }], 
         isError: true 
       };
     }
   }
-}; 
+};

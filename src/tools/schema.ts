@@ -1,8 +1,9 @@
-import { DatabaseConnection } from '../utils/connection.js';
+import { DatabaseConnection, sanitizeErrorMessage } from '../utils/connection.js';
 import { z } from 'zod';
 import type { PostgresTool, GetConnectionStringFn, ToolOutput } from '../types/tool.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import type { PoolClient } from 'pg'; // For transaction client type
+import { buildCreateEnumTypeSql, quoteIdent, quoteQualifiedIdent, redactSqlText } from '../utils/sql.js';
 
 interface SchemaResult {
   success: boolean;
@@ -11,6 +12,7 @@ interface SchemaResult {
 }
 
 interface TableInfo {
+  schema: string;
   tableName: string;
   columns: ColumnInfo[];
   constraints: ConstraintInfo[];
@@ -35,6 +37,21 @@ interface IndexInfo {
   definition: string;
 }
 
+interface CreatedColumnInfo {
+  name: string;
+  type: string;
+  nullable?: boolean;
+  defaultSet: boolean;
+}
+
+interface AlteredColumnInfo {
+  type: 'add' | 'alter' | 'drop';
+  columnName: string;
+  dataType?: string;
+  nullable?: boolean;
+  defaultChanged: boolean;
+}
+
 // Enum interfaces (from enums.ts)
 interface EnumInfo {
   enum_schema: string;
@@ -42,11 +59,16 @@ interface EnumInfo {
   enum_values: string[];
 }
 
+function formatValidationError(error: z.ZodError): string {
+  return error.errors.map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`).join(', ');
+}
+
 // --- GetSchemaInfo Tool ---
 const GetSchemaInfoInputSchema = z.object({
   connectionString: z.string().optional(),
+  schema: z.string().optional().default('public').describe("Schema name to inspect"),
   tableName: z.string().optional().describe("Optional table name to get detailed schema for"),
-});
+}).strict();
 type GetSchemaInfoInput = z.infer<typeof GetSchemaInfoInputSchema>;
 
 async function executeGetSchemaInfo(
@@ -55,25 +77,26 @@ async function executeGetSchemaInfo(
 ): Promise<TableInfo | string[]> { // Return type depends on whether tableName is provided
   const resolvedConnectionString = getConnectionString(input.connectionString);
   const db = DatabaseConnection.getInstance();
-  const { tableName } = input;
-  
+  const { tableName, schema } = input;
+
   try {
     await db.connect(resolvedConnectionString);
-    
+
     if (tableName) {
-      return await getTableInfo(db, tableName);
+      return await getTableInfo(db, tableName, schema);
     }
-    
+
     const tables = await db.query<{ table_name: string }>(
-      `SELECT table_name 
-       FROM information_schema.tables 
-       WHERE table_schema = 'public' AND table_type = 'BASE TABLE' -- Ensure only base tables
-       ORDER BY table_name`
+      `SELECT table_name
+       FROM information_schema.tables
+       WHERE table_schema = $1 AND table_type = 'BASE TABLE'
+       ORDER BY table_name`,
+      [schema]
     );
     return tables.map(t => t.table_name);
 
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to get schema information: ${error instanceof Error ? error.message : String(error)}`);
+    throw new McpError(ErrorCode.InternalError, `Failed to get schema information: ${sanitizeErrorMessage(error)}`);
   } finally {
     await db.disconnect();
   }
@@ -86,16 +109,17 @@ export const getSchemaInfoTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = GetSchemaInfoInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const result = await executeGetSchemaInfo(validationResult.data, getConnectionString);
-      const message = validationResult.data.tableName 
-        ? `Schema information for table ${validationResult.data.tableName}` 
-        : 'List of tables in database';
+      const schema = validationResult.data.schema;
+      const message = validationResult.data.tableName
+        ? `Schema information for table ${schema}.${validationResult.data.tableName}`
+        : `List of tables in schema ${schema}`;
       return { content: [{ type: 'text', text: message }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error getting schema info: ${errorMessage}` }], isError: true };
     }
   }
@@ -108,47 +132,66 @@ const CreateTableColumnSchema = z.object({
   nullable: z.boolean().optional(),
   default: z.string().optional().describe("Default value expression"),
   // primaryKey: z.boolean().optional(), // Consider adding PK constraint separately or via constraint tools
-});
+}).strict();
 
 const CreateTableInputSchema = z.object({
   connectionString: z.string().optional(),
   tableName: z.string(),
+  schema: z.string().optional().default('public'),
   columns: z.array(CreateTableColumnSchema).min(1),
   // primaryKeyColumns: z.array(z.string()).optional(), // Alternative for PKs
-});
+}).strict();
 type CreateTableInput = z.infer<typeof CreateTableInputSchema>;
 
+function validateDataType(dataType: string): string {
+  const normalizedType = dataType.trim().replace(/\s+/g, ' ');
+  if (!/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?(?:\s+[A-Za-z_][A-Za-z0-9_]*)*(?:\([0-9,\s]+\))?(?:\[\])?$/.test(normalizedType)) {
+    throw new Error(`Invalid PostgreSQL data type "${dataType}". Use simple type names such as text, integer, numeric(10,2), timestamp with time zone, or schema.type.`);
+  }
+
+  if (normalizedType.includes('.')) {
+    return normalizedType.split('.').map(quoteIdent).join('.');
+  }
+
+  return normalizedType;
+}
+
+function buildColumnDefinition(column: z.infer<typeof CreateTableColumnSchema>): string {
+  let definition = `${quoteIdent(column.name)} ${validateDataType(column.type)}`;
+  if (column.nullable === false) definition += ' NOT NULL';
+  if (column.default !== undefined) definition += ` DEFAULT ${column.default}`;
+  return definition;
+}
 async function executeCreateTable(
   input: CreateTableInput,
   getConnectionString: GetConnectionStringFn
-): Promise<{ tableName: string; columns: z.infer<typeof CreateTableColumnSchema>[] }> {
-  const resolvedConnectionString = getConnectionString(input.connectionString);
+): Promise<{ tableName: string; schema: string; columnCount: number; columns: CreatedColumnInfo[] }> {
   const db = DatabaseConnection.getInstance();
-  const { tableName, columns } = input;
+  const { tableName, schema, columns } = input;
 
   try {
-    await db.connect(resolvedConnectionString);
-    
-    const columnDefs = columns.map(col => {
-      let def = `"${col.name}" ${col.type}`;
-      if (col.nullable === false) def += ' NOT NULL';
-      if (col.default !== undefined) def += ` DEFAULT ${col.default}`;
-      // if (col.primaryKey) def += ' PRIMARY KEY'; // If using column-level PK
-      return def;
-    }).join(', ');
-    
-    // const primaryKeyDef = input.primaryKeyColumns && input.primaryKeyColumns.length > 0 
-    //  ? `, PRIMARY KEY (${input.primaryKeyColumns.map(pk => `"${pk}"`).join(', ')})` 
-    //  : '';
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
+    const columnDefs = columns.map(buildColumnDefinition).join(', ');
 
-    // const createTableSQL = `CREATE TABLE IF NOT EXISTS "${tableName}" (${columnDefs}${primaryKeyDef})`;
-    const createTableSQL = `CREATE TABLE IF NOT EXISTS "${tableName}" (${columnDefs})`;
-    
+    const createTableSQL = `CREATE TABLE IF NOT EXISTS ${qualifiedTableName} (${columnDefs})`;
+    const resolvedConnectionString = getConnectionString(input.connectionString);
+
+    await db.connect(resolvedConnectionString);
     await db.query(createTableSQL);
-    
-    return { tableName, columns };
+
+    return {
+      tableName,
+      schema,
+      columnCount: columns.length,
+      columns: columns.map((column) => ({
+        name: column.name,
+        type: column.type,
+        nullable: column.nullable,
+        defaultSet: column.default !== undefined
+      }))
+    };
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to create table: ${error instanceof Error ? error.message : String(error)}`);
+    throw new McpError(ErrorCode.InternalError, `Failed to create table: ${sanitizeErrorMessage(error)}`);
   } finally {
     await db.disconnect();
   }
@@ -161,13 +204,13 @@ export const createTableTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = CreateTableInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const result = await executeCreateTable(validationResult.data, getConnectionString);
       return { content: [{ type: 'text', text: `Table ${result.tableName} created successfully (if not exists).` }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error creating table: ${errorMessage}` }], isError: true };
     }
   }
@@ -180,80 +223,89 @@ const AlterTableOperationSchema = z.object({
   dataType: z.string().optional().describe("PostgreSQL data type (for add/alter)"),
   nullable: z.boolean().optional().describe("Whether the column can be NULL (for add/alter)"),
   default: z.string().optional().describe("Default value expression (for add/alter)"),
-});
+}).strict();
 
 const AlterTableInputSchema = z.object({
   connectionString: z.string().optional(),
   tableName: z.string(),
+  schema: z.string().optional().default('public'),
   operations: z.array(AlterTableOperationSchema).min(1),
-});
+}).strict();
 type AlterTableInput = z.infer<typeof AlterTableInputSchema>;
-
 async function executeAlterTable(
   input: AlterTableInput,
   getConnectionString: GetConnectionStringFn
-): Promise<{ tableName: string; operations: z.infer<typeof AlterTableOperationSchema>[] }> {
-  const resolvedConnectionString = getConnectionString(input.connectionString);
+): Promise<{ tableName: string; operationCount: number; operations: AlteredColumnInfo[] }> {
   const db = DatabaseConnection.getInstance();
-  const { tableName, operations } = input;
+  const { tableName, schema, operations } = input;
 
   try {
-    await db.connect(resolvedConnectionString);
-    
-    await db.transaction(async (client: PoolClient) => {
-      for (const op of operations) {
-        let sql = '';
-        const colNameQuoted = `"${op.columnName}"`;
-        
-        switch (op.type) {
-          case 'add':
-            if (!op.dataType) throw new Error('Data type is required for ADD operation');
-            sql = `ALTER TABLE "${tableName}" ADD COLUMN ${colNameQuoted} ${op.dataType}`;
-            if (op.nullable === false) sql += ' NOT NULL';
-            if (op.default !== undefined) sql += ` DEFAULT ${op.default}`;
-            break;
-            
-          case 'alter': {
-            // PostgreSQL requires separate ALTER COLUMN clauses for different alterations
-            // This simplified version might need to be split into multiple statements for complex alters
-            // Or use a more specific action like 'set data type', 'set default', 'set not null' etc.
-            sql = `ALTER TABLE "${tableName}" ALTER COLUMN ${colNameQuoted}`;
-            const alterActions: string[] = [];
-            if (op.dataType) alterActions.push(`TYPE ${op.dataType}`); // May need USING clause for some type changes
-            if (op.nullable !== undefined) {
-              alterActions.push(op.nullable ? 'DROP NOT NULL' : 'SET NOT NULL');
-            }
-            if (op.default !== undefined) {
-              alterActions.push(op.default === null || op.default === '' 
-                ? 'DROP DEFAULT' 
-                : `SET DEFAULT ${op.default}`);
-            }
-            if (alterActions.length === 0) throw new Error('No alter operation specified for column.');
-            // This only works if all actions can be combined in one ALTER COLUMN. Often not true.
-            // A robust solution would execute separate ALTER TABLE ... ALTER COLUMN statements for each action.
-            // For now, we will assume simple cases or require user to send multiple ops for one column.
-            sql += ` ${alterActions.join(' ')}`;
-            if (alterActions.length > 1) {
-              console.warn("[MCP Warning] Multiple alterations on a single column in one 'alter' operation might not be supported directly by PostgreSQL. Consider separate operations if it fails.");
-              // Example of how to split: Iterate alterActions and make separate SQL calls.
-              // For simplicity, current code attempts to combine.
-            }
-            break;
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
+    const statements: string[] = [];
+
+    for (const op of operations) {
+      const colNameQuoted = quoteIdent(op.columnName);
+
+      switch (op.type) {
+        case 'add':
+          if (!op.dataType) throw new Error('Data type is required for ADD operation');
+          let addColumnSql = `ALTER TABLE ${qualifiedTableName} ADD COLUMN ${colNameQuoted} ${validateDataType(op.dataType)}`;
+          if (op.nullable === false) addColumnSql += ' NOT NULL';
+          if (op.default !== undefined) addColumnSql += ` DEFAULT ${op.default}`;
+          statements.push(addColumnSql);
+          break;
+
+        case 'alter': {
+          let statementCount = 0;
+
+          if (op.dataType) {
+            statements.push(`ALTER TABLE ${qualifiedTableName} ALTER COLUMN ${colNameQuoted} TYPE ${validateDataType(op.dataType)}`);
+            statementCount++;
           }
-            
-          case 'drop':
-            sql = `ALTER TABLE "${tableName}" DROP COLUMN ${colNameQuoted}`;
-            break;
+
+          if (op.nullable !== undefined) {
+            statements.push(`ALTER TABLE ${qualifiedTableName} ALTER COLUMN ${colNameQuoted} ${op.nullable ? 'DROP NOT NULL' : 'SET NOT NULL'}`);
+            statementCount++;
+          }
+
+          if (op.default !== undefined) {
+            statements.push(`ALTER TABLE ${qualifiedTableName} ALTER COLUMN ${colNameQuoted} ${op.default === '' ? 'DROP DEFAULT' : `SET DEFAULT ${op.default}`}`);
+            statementCount++;
+          }
+
+          if (statementCount === 0) {
+            throw new Error('No alter operation specified for column.');
+          }
+          break;
         }
-        if (sql) { // Ensure sql is not empty, e.g. if alterActions was empty
-            await client.query(sql);
-        }
+
+        case 'drop':
+          statements.push(`ALTER TABLE ${qualifiedTableName} DROP COLUMN ${colNameQuoted}`);
+          break;
+      }
+    }
+
+    const resolvedConnectionString = getConnectionString(input.connectionString);
+    await db.connect(resolvedConnectionString);
+    await db.transaction(async (client: PoolClient) => {
+      for (const sql of statements) {
+        await client.query(sql);
       }
     });
-    
-    return { tableName, operations };
+
+    return {
+      tableName,
+      operationCount: operations.length,
+      operations: operations.map((operation) => ({
+        type: operation.type,
+        columnName: operation.columnName,
+        dataType: operation.dataType,
+        nullable: operation.nullable,
+        defaultChanged: operation.default !== undefined
+      }))
+    };
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to alter table: ${error instanceof Error ? error.message : String(error)}`);
+    throw new McpError(ErrorCode.InternalError, `Failed to alter table: ${sanitizeErrorMessage(error)}`);
   } finally {
     await db.disconnect();
   }
@@ -266,13 +318,13 @@ export const alterTableTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = AlterTableInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const result = await executeAlterTable(validationResult.data, getConnectionString);
       return { content: [{ type: 'text', text: `Table ${result.tableName} altered successfully.` }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error altering table: ${errorMessage}` }], isError: true };
     }
   }
@@ -281,7 +333,7 @@ export const alterTableTool: PostgresTool = {
 /**
  * Get detailed information about a specific table
  */
-async function getTableInfo(db: DatabaseConnection, tableName: string): Promise<TableInfo> {
+async function getTableInfo(db: DatabaseConnection, tableName: string, schema: string): Promise<TableInfo> {
   // Get column information
   const columns = await db.query<{
     column_name: string;
@@ -291,9 +343,9 @@ async function getTableInfo(db: DatabaseConnection, tableName: string): Promise<
   }>(
     `SELECT column_name, data_type, is_nullable, column_default
      FROM information_schema.columns
-     WHERE table_schema = 'public' AND table_name = $1
+     WHERE table_schema = $1 AND table_name = $2
      ORDER BY ordinal_position`,
-    [tableName]
+    [schema, tableName]
   );
   
   // Get constraint information
@@ -315,8 +367,9 @@ async function getTableInfo(db: DatabaseConnection, tableName: string): Promise<
      FROM pg_constraint c
      JOIN pg_namespace n ON n.oid = c.connamespace
      JOIN pg_class cl ON cl.oid = c.conrelid
-     WHERE n.nspname = 'public' AND cl.relname = $1`,
-    [tableName]
+     JOIN pg_namespace tn ON tn.oid = cl.relnamespace
+     WHERE tn.nspname = $1 AND cl.relname = $2`,
+    [schema, tableName]
   );
   
   // Get index information
@@ -331,33 +384,34 @@ async function getTableInfo(db: DatabaseConnection, tableName: string): Promise<
      JOIN pg_class c ON c.oid = x.indrelid
      JOIN pg_class i ON i.oid = x.indexrelid
      JOIN pg_namespace n ON n.oid = c.relnamespace
-     WHERE c.relkind = 'r' AND n.nspname = 'public' AND c.relname = $1`,
-    [tableName]
+     WHERE c.relkind = 'r' AND n.nspname = $1 AND c.relname = $2`,
+    [schema, tableName]
   );
-  
+
   return {
+    schema,
     tableName,
     columns: columns.map(col => ({
       name: col.column_name,
       dataType: col.data_type,
       nullable: col.is_nullable === 'YES',
-      default: col.column_default
+      default: col.column_default ? redactSqlText(col.column_default) : null
     })),
     constraints: constraints.map(con => ({
       name: con.constraint_name,
       type: con.constraint_type,
-      definition: con.definition
+      definition: redactSqlText(con.definition)
     })),
     indexes: indexes.map(idx => ({
       name: idx.indexname,
-      definition: idx.indexdef
+      definition: redactSqlText(idx.indexdef)
     }))
   };
 } 
 
 // Enum functions (adapted from enums.ts)
 async function executeGetEnumsInSchema(
-  connectionString: string,
+  connectionString: string | undefined,
   schema = 'public',
   enumName?: string,
   getConnectionString?: GetConnectionStringFn
@@ -370,7 +424,7 @@ async function executeGetEnumsInSchema(
       SELECT 
           n.nspname as enum_schema,
           t.typname as enum_name, 
-          array_agg(e.enumlabel ORDER BY e.enumsortorder) as enum_values
+          array_agg(e.enumlabel::text ORDER BY e.enumsortorder) as enum_values
       FROM pg_type t 
       JOIN pg_enum e ON t.oid = e.enumtypid
       JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
@@ -389,78 +443,67 @@ async function executeGetEnumsInSchema(
     return result;
 
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to fetch ENUMs: ${error instanceof Error ? error.message : String(error)}`);
+    throw new McpError(ErrorCode.InternalError, `Failed to fetch ENUMs: ${sanitizeErrorMessage(error)}`);
   } finally {
     await db.disconnect();
   }
 }
 
 async function executeCreateEnumInSchema(
-  connectionString: string,
+  connectionString: string | undefined,
   enumName: string,
   values: string[],
   schema = 'public',
   ifNotExists = false,
   getConnectionString?: GetConnectionStringFn
-): Promise<{ schema: string; enumName: string; values: string[]}> {
-  const resolvedConnectionString = getConnectionString ? getConnectionString(connectionString) : connectionString;
+): Promise<{ schema: string; enumName: string; valueCount: number}> {
   const db = DatabaseConnection.getInstance();
   try {
+    const query = buildCreateEnumTypeSql(enumName, values, schema, ifNotExists);
+    const resolvedConnectionString = getConnectionString ? getConnectionString(connectionString) : connectionString;
+
     await db.connect(resolvedConnectionString);
-    const qualifiedSchema = `"${schema}"`;
-    const qualifiedEnumName = `"${enumName}"`;
-    const fullEnumName = `${qualifiedSchema}.${qualifiedEnumName}`;
-    const valuesPlaceholders = values.map((_: string, i: number) => `$${i + 1}`).join(', ');
-    const ifNotExistsClause = ifNotExists ? 'IF NOT EXISTS' : '';
-
-    const query = `CREATE TYPE ${ifNotExistsClause} ${fullEnumName} AS ENUM (${valuesPlaceholders});`;
-
-    await db.query(query, values);
-    return { schema, enumName, values };
+    await db.query(query);
+    return { schema, enumName, valueCount: values.length };
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to create ENUM ${enumName}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new McpError(ErrorCode.InternalError, `Failed to create ENUM ${enumName}: ${sanitizeErrorMessage(error)}`);
   } finally {
       await db.disconnect();
   }
 }
 
+const ManageSchemaInputSchema = z.object({
+  connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
+  operation: z.enum(['get_info', 'create_table', 'alter_table', 'get_enums', 'create_enum']).describe('Operation: get_info (schema/table info), create_table (new table), alter_table (modify table), get_enums (list ENUMs), create_enum (new ENUM)'),
+
+  // Common parameters
+  tableName: z.string().optional().describe('Table name (optional for get_info to get specific table info, required for create_table/alter_table)'),
+  schema: z.string().optional().describe('Schema name (defaults to public)'),
+
+  // Create table parameters
+  columns: z.array(CreateTableColumnSchema).optional().describe('Column definitions (required for create_table)'),
+
+  // Alter table parameters
+  operations: z.array(AlterTableOperationSchema).optional().describe('Alter operations (required for alter_table)'),
+
+  // Enum parameters
+  enumName: z.string().optional().describe('ENUM name (optional for get_enums to filter, required for create_enum)'),
+  values: z.array(z.string()).optional().describe('ENUM values (required for create_enum)'),
+  ifNotExists: z.boolean().optional().describe('Ignore duplicate type errors by wrapping CREATE TYPE in a DO block (for create_enum)')
+}).strict();
+
 // Complete Consolidated Schema Management Tool (covers all 5 operations)
 export const manageSchemaTools: PostgresTool = {
   name: 'pg_manage_schema',
   description: 'Manage PostgreSQL schema - get schema info, create/alter tables, manage enums. Examples: operation="get_info" for table lists, operation="create_table" with tableName and columns, operation="get_enums" to list enums, operation="create_enum" with enumName and values',
-  inputSchema: z.object({
-    connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
-    operation: z.enum(['get_info', 'create_table', 'alter_table', 'get_enums', 'create_enum']).describe('Operation: get_info (schema/table info), create_table (new table), alter_table (modify table), get_enums (list ENUMs), create_enum (new ENUM)'),
-    
-    // Common parameters
-    tableName: z.string().optional().describe('Table name (optional for get_info to get specific table info, required for create_table/alter_table)'),
-    schema: z.string().optional().describe('Schema name (defaults to public)'),
-    
-    // Create table parameters
-    columns: z.array(z.object({
-      name: z.string(),
-      type: z.string().describe("PostgreSQL data type"),
-      nullable: z.boolean().optional(),
-      default: z.string().optional().describe("Default value expression"),
-    })).optional().describe('Column definitions (required for create_table)'),
-    
-    // Alter table parameters
-    operations: z.array(z.object({
-      type: z.enum(['add', 'alter', 'drop']),
-      columnName: z.string(),
-      dataType: z.string().optional().describe("PostgreSQL data type (for add/alter)"),
-      nullable: z.boolean().optional().describe("Whether the column can be NULL (for add/alter)"),
-      default: z.string().optional().describe("Default value expression (for add/alter)"),
-    })).optional().describe('Alter operations (required for alter_table)'),
-    
-    // Enum parameters
-    enumName: z.string().optional().describe('ENUM name (optional for get_enums to filter, required for create_enum)'),
-    values: z.array(z.string()).optional().describe('ENUM values (required for create_enum)'),
-    ifNotExists: z.boolean().optional().describe('Include IF NOT EXISTS clause (for create_enum)')
-  }),
-  // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-  execute: async (args: any, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
-    const { 
+  inputSchema: ManageSchemaInputSchema,
+  execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
+    const validationResult = ManageSchemaInputSchema.safeParse(args);
+    if (!validationResult.success) {
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
+    }
+
+    const {
       connectionString: connStringArg,
       operation,
       tableName,
@@ -470,39 +513,20 @@ export const manageSchemaTools: PostgresTool = {
       enumName,
       values,
       ifNotExists
-    } = args as {
-      connectionString?: string;
-      operation: 'get_info' | 'create_table' | 'alter_table' | 'get_enums' | 'create_enum';
-      tableName?: string;
-      schema?: string;
-      columns?: Array<{
-        name: string;
-        type: string;
-        nullable?: boolean;
-        default?: string;
-      }>;
-      operations?: Array<{
-        type: 'add' | 'alter' | 'drop';
-        columnName: string;
-        dataType?: string;
-        nullable?: boolean;
-        default?: string;
-      }>;
-      enumName?: string;
-      values?: string[];
-      ifNotExists?: boolean;
-    };
+    } = validationResult.data;
 
     try {
       switch (operation) {
         case 'get_info': {
           const result = await executeGetSchemaInfo({
             connectionString: connStringArg,
+            schema: schema || 'public',
             tableName
           }, getConnectionStringVal);
-          const message = tableName 
-            ? `Schema information for table ${tableName}` 
-            : 'List of tables in database';
+          const resolvedSchema = schema || 'public';
+          const message = tableName
+            ? `Schema information for table ${resolvedSchema}.${tableName}`
+            : `List of tables in schema ${resolvedSchema}`;
           return { content: [{ type: 'text', text: message }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
         }
 
@@ -516,6 +540,7 @@ export const manageSchemaTools: PostgresTool = {
           const result = await executeCreateTable({
             connectionString: connStringArg,
             tableName,
+            schema: schema || 'public',
             columns
           }, getConnectionStringVal);
           return { content: [{ type: 'text', text: `Table ${result.tableName} created successfully (if not exists).` }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
@@ -531,6 +556,7 @@ export const manageSchemaTools: PostgresTool = {
           const result = await executeAlterTable({
             connectionString: connStringArg,
             tableName,
+            schema: schema || 'public',
             operations
           }, getConnectionStringVal);
           return { content: [{ type: 'text', text: `Table ${result.tableName} altered successfully.` }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
@@ -538,7 +564,7 @@ export const manageSchemaTools: PostgresTool = {
 
         case 'get_enums': {
           const result = await executeGetEnumsInSchema(
-            connStringArg || '', 
+            connStringArg,
             schema || 'public', 
             enumName, 
             getConnectionStringVal
@@ -554,7 +580,7 @@ export const manageSchemaTools: PostgresTool = {
             };
           }
           const result = await executeCreateEnumInSchema(
-            connStringArg || '', 
+            connStringArg,
             enumName, 
             values, 
             schema || 'public', 
@@ -572,8 +598,8 @@ export const manageSchemaTools: PostgresTool = {
       }
 
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error executing ${operation} operation: ${errorMessage}` }], isError: true };
     }
   }
-}; 
+};

@@ -1,7 +1,31 @@
-import { DatabaseConnection } from '../utils/connection.js';
+import { DatabaseConnection, sanitizeErrorMessage } from '../utils/connection.js';
 import { z } from 'zod';
 import type { PostgresTool, GetConnectionStringFn, ToolOutput } from '../types/tool.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+import {
+  buildStaticWhereClause,
+  quoteIdent,
+  quoteQualifiedIdent,
+  redactSqlText,
+  type WherePredicate
+} from '../utils/sql.js';
+
+const SqlScalarSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+const WhereOperatorSchema = z.object({
+  eq: SqlScalarSchema.optional(),
+  ne: SqlScalarSchema.optional(),
+  gt: SqlScalarSchema.optional(),
+  gte: SqlScalarSchema.optional(),
+  lt: SqlScalarSchema.optional(),
+  lte: SqlScalarSchema.optional(),
+  like: z.string().optional(),
+  ilike: z.string().optional(),
+  in: z.array(SqlScalarSchema).optional(),
+  isNull: z.boolean().optional()
+}).strict().refine((value) => Object.values(value).filter((item) => item !== undefined).length === 1, {
+  message: 'Each where predicate must specify exactly one operator'
+});
+const WherePredicateSchema = z.record(z.union([SqlScalarSchema, WhereOperatorSchema]));
 
 interface IndexInfo {
   schemaname: string;
@@ -28,13 +52,25 @@ interface IndexUsageStats {
   usage_ratio: number;
 }
 
+function toInternalError(prefix: string, error: unknown): McpError {
+  if (error instanceof McpError) {
+    return error;
+  }
+
+  return new McpError(ErrorCode.InternalError, `${prefix}: ${sanitizeErrorMessage(error)}`);
+}
+
+function formatValidationError(error: z.ZodError): string {
+  return error.errors.map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`).join(', ');
+}
+
 // --- Get Indexes Tool ---
 const GetIndexesInputSchema = z.object({
   connectionString: z.string().optional(),
   schema: z.string().optional().default('public').describe("Schema name"),
   tableName: z.string().optional().describe("Optional table name to filter indexes"),
   includeStats: z.boolean().optional().default(true).describe("Include usage statistics"),
-});
+}).strict();
 type GetIndexesInput = z.infer<typeof GetIndexesInputSchema>;
 
 async function executeGetIndexes(
@@ -92,9 +128,12 @@ async function executeGetIndexes(
     
     const params = tableName ? [schema, tableName] : [schema];
     const results = await db.query<IndexInfo>(basicQuery, params);
-    return results;
+    return results.map((row) => ({
+      ...row,
+      indexdef: redactSqlText(row.indexdef)
+    }));
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to get indexes: ${error instanceof Error ? error.message : String(error)}`);
+    throw toInternalError('Failed to get indexes', error);
   } finally {
     await db.disconnect();
   }
@@ -107,7 +146,7 @@ export const getIndexesTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = GetIndexesInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const result = await executeGetIndexes(validationResult.data, getConnectionString);
@@ -116,7 +155,7 @@ export const getIndexesTool: PostgresTool = {
         : `Indexes in schema ${validationResult.data.schema}`;
       return { content: [{ type: 'text', text: message }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error getting indexes: ${errorMessage}` }], isError: true };
     }
   }
@@ -132,37 +171,54 @@ const CreateIndexInputSchema = z.object({
   unique: z.boolean().optional().default(false).describe("Create unique index"),
   concurrent: z.boolean().optional().default(false).describe("Create index concurrently"),
   method: z.enum(['btree', 'hash', 'gist', 'spgist', 'gin', 'brin']).optional().default('btree').describe("Index method"),
-  where: z.string().optional().describe("WHERE clause for partial index"),
+  where: z.union([WherePredicateSchema, z.string()]).optional().describe("Structured WHERE predicate for partial index. Legacy string predicates are unsafe."),
+  rawWhere: z.string().optional().describe("Unsafe raw WHERE SQL clause for trusted local/admin use only"),
   ifNotExists: z.boolean().optional().default(true).describe("Include IF NOT EXISTS clause"),
-});
+}).strict();
 type CreateIndexInput = z.infer<typeof CreateIndexInputSchema>;
 
 async function executeCreateIndex(
   input: CreateIndexInput,
   getConnectionString: GetConnectionStringFn
-): Promise<{ indexName: string; tableName: string; definition: string }> {
-  const resolvedConnectionString = getConnectionString(input.connectionString);
+): Promise<{ indexName: string; tableName: string; schema: string; columnCount: number; predicateSet: boolean; created: true }> {
   const db = DatabaseConnection.getInstance();
-  const { indexName, tableName, columns, schema, unique, concurrent, method, where, ifNotExists } = input;
+  const { indexName, tableName, columns, schema, unique, concurrent, method, where, rawWhere, ifNotExists } = input;
 
   try {
-    await db.connect(resolvedConnectionString);
-    
-    const schemaPrefix = schema !== 'public' ? `"${schema}".` : '';
+    const qualifiedIndexName = quoteQualifiedIdent(indexName, schema);
+    const qualifiedTableName = quoteQualifiedIdent(tableName, schema);
     const uniqueClause = unique ? 'UNIQUE ' : '';
     const concurrentClause = concurrent ? 'CONCURRENTLY ' : '';
     const ifNotExistsClause = ifNotExists ? 'IF NOT EXISTS ' : '';
-    const columnsClause = columns.map(col => `"${col}"`).join(', ');
+    const columnsClause = columns.map(quoteIdent).join(', ');
     const methodClause = method !== 'btree' ? ` USING ${method}` : '';
-    const whereClause = where ? ` WHERE ${where}` : '';
-    
-    const createIndexSQL = `CREATE ${uniqueClause}INDEX ${concurrentClause}${ifNotExistsClause}"${indexName}" ON ${schemaPrefix}"${tableName}"${methodClause} (${columnsClause})${whereClause}`;
-    
+    if (where && typeof where === 'string') {
+      throw new McpError(ErrorCode.InvalidParams, 'String where predicates are not allowed. Use structured where predicates or rawWhere for trusted local/admin SQL.');
+    }
+    const whereClause = rawWhere
+      ? ` WHERE ${rawWhere}`
+      : where && typeof where !== 'string'
+        ? ` WHERE ${buildStaticWhereClause(where as WherePredicate)}`
+        : where
+          ? ` WHERE ${where}`
+          : '';
+
+    const createIndexSQL = `CREATE ${uniqueClause}INDEX ${concurrentClause}${ifNotExistsClause}${qualifiedIndexName} ON ${qualifiedTableName}${methodClause} (${columnsClause})${whereClause}`;
+    const resolvedConnectionString = getConnectionString(input.connectionString);
+
+    await db.connect(resolvedConnectionString);
     await db.query(createIndexSQL);
-    
-    return { indexName, tableName, definition: createIndexSQL };
+
+    return {
+      indexName,
+      tableName,
+      schema,
+      columnCount: columns.length,
+      predicateSet: Boolean(whereClause),
+      created: true
+    };
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to create index: ${error instanceof Error ? error.message : String(error)}`);
+    throw toInternalError('Failed to create index', error);
   } finally {
     await db.disconnect();
   }
@@ -175,13 +231,13 @@ export const createIndexTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = CreateIndexInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const result = await executeCreateIndex(validationResult.data, getConnectionString);
       return { content: [{ type: 'text', text: `Index ${result.indexName} created successfully.` }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error creating index: ${errorMessage}` }], isError: true };
     }
   }
@@ -195,32 +251,31 @@ const DropIndexInputSchema = z.object({
   concurrent: z.boolean().optional().default(false).describe("Drop index concurrently"),
   ifExists: z.boolean().optional().default(true).describe("Include IF EXISTS clause"),
   cascade: z.boolean().optional().default(false).describe("Include CASCADE clause"),
-});
+}).strict();
 type DropIndexInput = z.infer<typeof DropIndexInputSchema>;
 
 async function executeDropIndex(
   input: DropIndexInput,
   getConnectionString: GetConnectionStringFn
 ): Promise<{ indexName: string; schema: string }> {
-  const resolvedConnectionString = getConnectionString(input.connectionString);
   const db = DatabaseConnection.getInstance();
   const { indexName, schema, concurrent, ifExists, cascade } = input;
 
   try {
-    await db.connect(resolvedConnectionString);
-    
-    const schemaPrefix = schema !== 'public' ? `"${schema}".` : '';
+    const qualifiedIndexName = quoteQualifiedIdent(indexName, schema);
     const concurrentClause = concurrent ? 'CONCURRENTLY ' : '';
     const ifExistsClause = ifExists ? 'IF EXISTS ' : '';
     const cascadeClause = cascade ? ' CASCADE' : '';
-    
-    const dropIndexSQL = `DROP INDEX ${concurrentClause}${ifExistsClause}${schemaPrefix}"${indexName}"${cascadeClause}`;
-    
+
+    const dropIndexSQL = `DROP INDEX ${concurrentClause}${ifExistsClause}${qualifiedIndexName}${cascadeClause}`;
+    const resolvedConnectionString = getConnectionString(input.connectionString);
+
+    await db.connect(resolvedConnectionString);
     await db.query(dropIndexSQL);
-    
+
     return { indexName, schema };
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to drop index: ${error instanceof Error ? error.message : String(error)}`);
+    throw toInternalError('Failed to drop index', error);
   } finally {
     await db.disconnect();
   }
@@ -233,13 +288,13 @@ export const dropIndexTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = DropIndexInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const result = await executeDropIndex(validationResult.data, getConnectionString);
       return { content: [{ type: 'text', text: `Index ${result.indexName} dropped successfully.` }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error dropping index: ${errorMessage}` }], isError: true };
     }
   }
@@ -252,47 +307,44 @@ const ReindexInputSchema = z.object({
   type: z.enum(['index', 'table', 'schema', 'database']).describe("Type of target to reindex"),
   schema: z.string().optional().default('public').describe("Schema name (for table/index targets)"),
   concurrent: z.boolean().optional().default(false).describe("Reindex concurrently (PostgreSQL 12+)"),
-});
+}).strict();
 type ReindexInput = z.infer<typeof ReindexInputSchema>;
 
 async function executeReindex(
   input: ReindexInput,
   getConnectionString: GetConnectionStringFn
 ): Promise<{ target: string; type: string; schema?: string }> {
-  const resolvedConnectionString = getConnectionString(input.connectionString);
   const db = DatabaseConnection.getInstance();
   const { target, type, schema, concurrent } = input;
 
   try {
-    await db.connect(resolvedConnectionString);
-    
     let reindexSQL = '';
     const concurrentClause = concurrent ? ' CONCURRENTLY' : '';
-    
+
     switch (type) {
       case 'index': {
-        const schemaPrefix = schema !== 'public' ? `"${schema}".` : '';
-        reindexSQL = `REINDEX${concurrentClause} INDEX ${schemaPrefix}"${target}"`;
+        reindexSQL = `REINDEX${concurrentClause} INDEX ${quoteQualifiedIdent(target, schema)}`;
         break;
       }
       case 'table': {
-        const tableSchemaPrefix = schema !== 'public' ? `"${schema}".` : '';
-        reindexSQL = `REINDEX${concurrentClause} TABLE ${tableSchemaPrefix}"${target}"`;
+        reindexSQL = `REINDEX${concurrentClause} TABLE ${quoteQualifiedIdent(target, schema)}`;
         break;
       }
       case 'schema':
-        reindexSQL = `REINDEX${concurrentClause} SCHEMA "${target}"`;
+        reindexSQL = `REINDEX${concurrentClause} SCHEMA ${quoteIdent(target)}`;
         break;
       case 'database':
-        reindexSQL = `REINDEX${concurrentClause} DATABASE "${target}"`;
+        reindexSQL = `REINDEX${concurrentClause} DATABASE ${quoteIdent(target)}`;
         break;
     }
-    
+
+    const resolvedConnectionString = getConnectionString(input.connectionString);
+    await db.connect(resolvedConnectionString);
     await db.query(reindexSQL);
-    
+
     return { target, type, schema };
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to reindex: ${error instanceof Error ? error.message : String(error)}`);
+    throw toInternalError('Failed to reindex', error);
   } finally {
     await db.disconnect();
   }
@@ -305,13 +357,13 @@ export const reindexTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = ReindexInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const result = await executeReindex(validationResult.data, getConnectionString);
       return { content: [{ type: 'text', text: `Reindex completed successfully for ${result.type} ${result.target}.` }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error during reindex: ${errorMessage}` }], isError: true };
     }
   }
@@ -322,10 +374,10 @@ const AnalyzeIndexUsageInputSchema = z.object({
   connectionString: z.string().optional(),
   schema: z.string().optional().default('public').describe("Schema name"),
   tableName: z.string().optional().describe("Optional table name to filter"),
-  minSizeBytes: z.number().optional().describe("Minimum index size in bytes to include"),
+  minSizeBytes: z.number().min(0).optional().describe("Minimum index size in bytes to include"),
   showUnused: z.boolean().optional().default(true).describe("Include indexes with zero scans"),
   showDuplicates: z.boolean().optional().default(true).describe("Detect potentially duplicate indexes"),
-});
+}).strict();
 type AnalyzeIndexUsageInput = z.infer<typeof AnalyzeIndexUsageInputSchema>;
 
 interface IndexAnalysis {
@@ -420,7 +472,7 @@ async function executeAnalyzeIndexUsage(
       
       duplicate_indexes = duplicateResults.map(row => ({
         table_name: row.tablename,
-        columns: row.definitions,
+        columns: redactSqlText(row.definitions),
         indexes: row.index_names
       }));
     }
@@ -444,7 +496,7 @@ async function executeAnalyzeIndexUsage(
     };
     
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to analyze index usage: ${error instanceof Error ? error.message : String(error)}`);
+    throw toInternalError('Failed to analyze index usage', error);
   } finally {
     await db.disconnect();
   }
@@ -462,7 +514,7 @@ export const analyzeIndexUsageTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = AnalyzeIndexUsageInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], isError: true };
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
     }
     try {
       const result = await executeAnalyzeIndexUsage(validationResult.data, getConnectionString);
@@ -471,52 +523,59 @@ export const analyzeIndexUsageTool: PostgresTool = {
         : `Index usage analysis for schema ${validationResult.data.schema}`;
       return { content: [{ type: 'text', text: message }, { type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { content: [{ type: 'text', text: `Error analyzing index usage: ${errorMessage}` }], isError: true };
     }
   }
 };
 
+const ManageIndexesInputSchema = z.object({
+  connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
+  operation: z.enum(['get', 'create', 'drop', 'reindex', 'analyze_usage']).describe('Operation: get (list indexes), create (new index), drop (remove index), reindex (rebuild), analyze_usage (find unused/duplicate)'),
+
+  // Common parameters
+  schema: z.string().optional().describe('Schema name (defaults to public)'),
+  tableName: z.string().optional().describe('Table name (optional for get/analyze_usage, required for create)'),
+  indexName: z.string().optional().describe('Index name (required for create/drop)'),
+
+  // Get operation parameters
+  includeStats: z.boolean().optional().describe('Include usage statistics (for get operation)'),
+
+  // Create operation parameters
+  columns: z.array(z.string()).optional().describe('Column names for the index (required for create operation)'),
+  unique: z.boolean().optional().describe('Create unique index (for create operation)'),
+  concurrent: z.boolean().optional().describe('Create/drop index concurrently (for create/drop operations)'),
+  method: z.enum(['btree', 'hash', 'gist', 'spgist', 'gin', 'brin']).optional().describe('Index method (for create operation, defaults to btree)'),
+  where: z.union([WherePredicateSchema, z.string()]).optional().describe('Structured WHERE predicate for partial index (for create operation). Legacy string predicates are unsafe.'),
+  rawWhere: z.string().optional().describe('Unsafe raw WHERE SQL clause for trusted local/admin use only'),
+  ifNotExists: z.boolean().optional().describe('Include IF NOT EXISTS clause (for create operation)'),
+
+  // Drop operation parameters
+  ifExists: z.boolean().optional().describe('Include IF EXISTS clause (for drop operation)'),
+  cascade: z.boolean().optional().describe('Include CASCADE clause (for drop operation)'),
+
+  // Reindex operation parameters
+  target: z.string().optional().describe('Target name for reindex (required for reindex operation)'),
+  type: z.enum(['index', 'table', 'schema', 'database']).optional().describe('Type of target for reindex (required for reindex operation)'),
+
+  // Analyze usage parameters
+  minSizeBytes: z.number().min(0).optional().describe('Minimum index size in bytes (for analyze_usage operation)'),
+  showUnused: z.boolean().optional().describe('Include unused indexes (for analyze_usage operation)'),
+  showDuplicates: z.boolean().optional().describe('Detect duplicate indexes (for analyze_usage operation)')
+}).strict();
+
 // Consolidated Index Management Tool
 export const manageIndexesTool: PostgresTool = {
   name: 'pg_manage_indexes',
   description: 'Manage PostgreSQL indexes - get, create, drop, reindex, and analyze usage with a single tool. Examples: operation="get" to list indexes, operation="create" with indexName, tableName, columns, operation="analyze_usage" for performance analysis',
-  inputSchema: z.object({
-    connectionString: z.string().optional().describe('PostgreSQL connection string (optional)'),
-    operation: z.enum(['get', 'create', 'drop', 'reindex', 'analyze_usage']).describe('Operation: get (list indexes), create (new index), drop (remove index), reindex (rebuild), analyze_usage (find unused/duplicate)'),
-    
-    // Common parameters
-    schema: z.string().optional().describe('Schema name (defaults to public)'),
-    tableName: z.string().optional().describe('Table name (optional for get/analyze_usage, required for create)'),
-    indexName: z.string().optional().describe('Index name (required for create/drop)'),
-    
-    // Get operation parameters
-    includeStats: z.boolean().optional().describe('Include usage statistics (for get operation)'),
-    
-    // Create operation parameters
-    columns: z.array(z.string()).optional().describe('Column names for the index (required for create operation)'),
-    unique: z.boolean().optional().describe('Create unique index (for create operation)'),
-    concurrent: z.boolean().optional().describe('Create/drop index concurrently (for create/drop operations)'),
-    method: z.enum(['btree', 'hash', 'gist', 'spgist', 'gin', 'brin']).optional().describe('Index method (for create operation, defaults to btree)'),
-    where: z.string().optional().describe('WHERE clause for partial index (for create operation)'),
-    ifNotExists: z.boolean().optional().describe('Include IF NOT EXISTS clause (for create operation)'),
-    
-    // Drop operation parameters
-    ifExists: z.boolean().optional().describe('Include IF EXISTS clause (for drop operation)'),
-    cascade: z.boolean().optional().describe('Include CASCADE clause (for drop operation)'),
-    
-    // Reindex operation parameters
-    target: z.string().optional().describe('Target name for reindex (required for reindex operation)'),
-    type: z.enum(['index', 'table', 'schema', 'database']).optional().describe('Type of target for reindex (required for reindex operation)'),
-    
-    // Analyze usage parameters
-    minSizeBytes: z.number().optional().describe('Minimum index size in bytes (for analyze_usage operation)'),
-    showUnused: z.boolean().optional().describe('Include unused indexes (for analyze_usage operation)'),
-    showDuplicates: z.boolean().optional().describe('Detect duplicate indexes (for analyze_usage operation)')
-  }),
-  // biome-ignore lint/suspicious/noExplicitAny: <explanation>
-  execute: async (args: any, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
-    const { 
+  inputSchema: ManageIndexesInputSchema,
+  execute: async (args: unknown, getConnectionStringVal: GetConnectionStringFn): Promise<ToolOutput> => {
+    const validationResult = ManageIndexesInputSchema.safeParse(args);
+    if (!validationResult.success) {
+      return { content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }], isError: true };
+    }
+
+    const {
       connectionString: connStringArg,
       operation,
       schema,
@@ -528,6 +587,7 @@ export const manageIndexesTool: PostgresTool = {
       concurrent,
       method,
       where,
+      rawWhere,
       ifNotExists,
       ifExists,
       cascade,
@@ -536,27 +596,7 @@ export const manageIndexesTool: PostgresTool = {
       minSizeBytes,
       showUnused,
       showDuplicates
-    } = args as {
-      connectionString?: string;
-      operation: 'get' | 'create' | 'drop' | 'reindex' | 'analyze_usage';
-      schema?: string;
-      tableName?: string;
-      indexName?: string;
-      includeStats?: boolean;
-      columns?: string[];
-      unique?: boolean;
-      concurrent?: boolean;
-      method?: 'btree' | 'hash' | 'gist' | 'spgist' | 'gin' | 'brin';
-      where?: string;
-      ifNotExists?: boolean;
-      ifExists?: boolean;
-      cascade?: boolean;
-      target?: string;
-      type?: 'index' | 'table' | 'schema' | 'database';
-      minSizeBytes?: number;
-      showUnused?: boolean;
-      showDuplicates?: boolean;
-    };
+    } = validationResult.data;
 
     try {
       switch (operation) {
@@ -590,6 +630,7 @@ export const manageIndexesTool: PostgresTool = {
             concurrent: concurrent ?? false,
             method: method ?? 'btree',
             where,
+            rawWhere,
             ifNotExists: ifNotExists ?? true
           }, getConnectionStringVal);
           return { content: [{ type: 'text', text: `Index ${result.indexName} created successfully. Details: ${JSON.stringify(result)}` }] };
@@ -650,11 +691,11 @@ export const manageIndexesTool: PostgresTool = {
       }
 
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { 
         content: [{ type: 'text', text: `Error executing ${operation} operation: ${errorMessage}` }], 
         isError: true 
       };
     }
   }
-}; 
+};

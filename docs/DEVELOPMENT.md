@@ -1,382 +1,77 @@
 # PostgreSQL MCP Server Development Guide
 
-## Development Environment Setup
+This file is the broad development checklist. For implementation details and security rules, see [DEVELOPER.md](DEVELOPER.md).
 
-### Prerequisites
+## Setup
 
-1. **Node.js Environment**
-   - Node.js >= 18.0.0
-   - npm or yarn
-   - TypeScript knowledge
-
-2. **PostgreSQL Setup**
-   - PostgreSQL server (latest stable version)
-   - psql command-line tool
-   - Development database
-
-3. **Development Tools**
-   - VS Code or preferred IDE
-   - ESLint
-   - Git
-
-### Initial Setup
-
-1. **Clone Repository**
-   ```bash
-   git clone [repository-url]
-   cd postgresql-mcp-server
-   ```
-
-2. **Install Dependencies**
-   ```bash
-   npm install
-   ```
-
-3. **Configure Development Environment**
-   ```bash
-   # Create .env file
-   cp .env.example .env
-   
-   # Edit with your settings
-   vim .env
-   ```
-
-4. **Build Project**
-   ```bash
-   npm run build
-   ```
-
-## Project Structure
-
-```
-postgresql-mcp-server/
-├── src/
-│   ├── index.ts              # Main entry point
-│   ├── server/              # MCP server implementation
-│   │   ├── index.ts         # Server setup
-│   │   └── handlers.ts      # Request handlers
-│   ├── tools/               # MCP tools implementation
-│   │   ├── analyze.ts       # Database analysis
-│   │   ├── setup.ts         # Setup instructions
-│   │   └── debug.ts         # Debugging tools
-│   ├── db/                  # Database interactions
-│   │   ├── connection.ts    # Connection management
-│   │   └── queries.ts       # SQL queries
-│   └── utils/               # Utility functions
-├── tests/                   # Test files
-├── docs/                    # Documentation
-└── build/                   # Compiled output
+```bash
+npm install
+npm run test:run
+npm run build
 ```
 
-## Adding New Features
+Use Node.js 18 or newer. Tests are written with Vitest and are designed to run deterministically with one worker.
 
-### 1. Creating a New Tool
+## Integration Tests
 
-1. **Define Tool Interface**
-   ```typescript
-   // src/types/tools.ts
-   interface NewToolInput {
-     param1: string;
-     param2?: number;
-     options?: {
-       // Tool options
-     };
-   }
+Real PostgreSQL integration tests are opt-in and require a disposable database:
 
-   interface NewToolOutput {
-     status: "success" | "error";
-     data: {
-       // Tool output
-     };
-     error?: {
-       code: string;
-       message: string;
-     };
-   }
-   ```
-
-2. **Implement Tool Logic**
-   ```typescript
-   // src/tools/newTool.ts
-   import { Tool } from '../types';
-
-   export class NewTool implements Tool {
-     async execute(input: NewToolInput): Promise<NewToolOutput> {
-       try {
-         // Tool implementation
-         return {
-           status: "success",
-           data: {
-             // Result data
-           }
-         };
-       } catch (error) {
-         return {
-           status: "error",
-           error: {
-             code: "TOOL_ERROR",
-             message: error.message
-           }
-         };
-       }
-     }
-   }
-   ```
-
-3. **Register Tool**
-   ```typescript
-   // src/server/index.ts
-   import { NewTool } from '../tools/newTool';
-
-   server.registerTool('new_tool', new NewTool());
-   ```
-
-### 2. Adding Database Features
-
-1. **Define Database Queries**
-   ```typescript
-   // src/db/queries.ts
-   export const newFeatureQueries = {
-     getData: `
-       SELECT *
-       FROM your_table
-       WHERE condition = $1
-     `,
-     updateData: `
-       UPDATE your_table
-       SET column = $1
-       WHERE id = $2
-     `
-   };
-   ```
-
-2. **Implement Database Operations**
-   ```typescript
-   // src/db/operations.ts
-   import { pool } from './connection';
-   import { newFeatureQueries } from './queries';
-
-   export async function performNewOperation(params: any) {
-     const client = await pool.connect();
-     try {
-       await client.query('BEGIN');
-       // Perform operations
-       await client.query('COMMIT');
-     } catch (error) {
-       await client.query('ROLLBACK');
-       throw error;
-     } finally {
-       client.release();
-     }
-   }
-   ```
-
-### 3. Adding Utility Functions
-
-1. **Create Utility Module**
-   ```typescript
-   // src/utils/newUtil.ts
-   export function newUtilityFunction(input: any): any {
-     // Implementation
-   }
-   ```
-
-2. **Add Tests**
-   ```typescript
-   // tests/utils/newUtil.test.ts
-   import { newUtilityFunction } from '../../src/utils/newUtil';
-
-   describe('newUtilityFunction', () => {
-     it('should handle valid input', () => {
-       // Test implementation
-     });
-
-     it('should handle invalid input', () => {
-       // Test implementation
-     });
-   });
-   ```
-
-## Testing
-
-### Unit Tests
-
-```typescript
-// tests/tools/newTool.test.ts
-import { NewTool } from '../../src/tools/newTool';
-
-describe('NewTool', () => {
-  let tool: NewTool;
-
-  beforeEach(() => {
-    tool = new NewTool();
-  });
-
-  it('should process valid input', async () => {
-    const input = {
-      param1: 'test',
-      param2: 123
-    };
-
-    const result = await tool.execute(input);
-    expect(result.status).toBe('success');
-  });
-
-  it('should handle errors', async () => {
-    const input = {
-      param1: 'invalid'
-    };
-
-    const result = await tool.execute(input);
-    expect(result.status).toBe('error');
-  });
-});
+```bash
+POSTGRES_MCP_INTEGRATION_CONNECTION_STRING="postgresql://user:pass@localhost:5432/postgres" npm run test:integration
 ```
 
-### Integration Tests
+The suite creates and drops a temporary schema. Without `POSTGRES_MCP_INTEGRATION_CONNECTION_STRING`, the integration file is skipped during normal `npm run test:run` and `npm run prepublishOnly`.
 
-```typescript
-// tests/integration/newTool.test.ts
-import { setupTestDatabase, teardownTestDatabase } from '../helpers';
+GitHub Actions runs the integration suite with a PostgreSQL service on pull requests, pushes to `main`, and release publishing.
 
-describe('NewTool Integration', () => {
-  beforeAll(async () => {
-    await setupTestDatabase();
-  });
+## Repository Layout
 
-  afterAll(async () => {
-    await teardownTestDatabase();
-  });
-
-  it('should interact with database', async () => {
-    // Test implementation
-  });
-});
+```text
+src/
+  index.ts              server entrypoint, CLI/config, tool registration
+  integration/          opt-in real PostgreSQL integration tests
+  security/             tool-call policy classification and tests
+  tools/                MCP tools and focused tests
+  types/                shared TypeScript types
+  utils/                SQL, connection, and filesystem helpers
+docs/                   published documentation
+build/                  compiled package output
 ```
 
-## Error Handling
+## Change Workflow
 
-### 1. Custom Error Types
+1. Inspect the existing tool and helper patterns before editing.
+2. Keep new SQL behind typed schemas, identifier quoting, and bind parameters.
+3. Update `src/security/policy.ts` for every new tool or operation.
+4. Add focused tests beside the changed module.
+5. Update [TOOL_SCHEMAS.md](../TOOL_SCHEMAS.md) and relevant docs.
+6. Run verification:
 
-```typescript
-// src/types/errors.ts
-export class ToolError extends Error {
-  constructor(
-    message: string,
-    public code: string,
-    public details?: any
-  ) {
-    super(message);
-    this.name = 'ToolError';
-  }
-}
+```bash
+npm run prepublishOnly
+git diff --check
 ```
 
-### 2. Error Handling in Tools
+## Documentation Rules
 
-```typescript
-try {
-  // Tool operation
-} catch (error) {
-  if (error instanceof DatabaseError) {
-    throw new ToolError(
-      'Database operation failed',
-      'DATABASE_ERROR',
-      error
-    );
-  }
-  throw error;
-}
+Security-sensitive behavior must be documented where users are most likely to read it:
+
+- README for defaults and operational posture.
+- SECURITY for sandboxing, approvals, audit events, non-goals, and deployment posture.
+- TOOL_SCHEMAS for exact tool parameters and per-tool caveats.
+- docs/USAGE for common workflows.
+- docs/TECHNICAL for architecture and implementation constraints.
+- docs/DEVELOPER for contribution rules.
+
+Do not document per-tool connection strings as the default path. They are disabled unless `--allow-tool-connection-string` or `POSTGRES_MCP_ALLOW_TOOL_CONNECTION_STRING=true` is configured.
+
+## Release Checklist
+
+```bash
+npm run prepublishOnly
+git diff --check
+npm pack --dry-run
 ```
 
-## Documentation
-
-### 1. Code Documentation
-
-```typescript
-/**
- * Performs analysis of database configuration
- * @param {string} connectionString - PostgreSQL connection string
- * @param {AnalysisOptions} options - Analysis options
- * @returns {Promise<AnalysisResult>} Analysis results
- * @throws {ToolError} When analysis fails
- */
-async function analyzeConfiguration(
-  connectionString: string,
-  options: AnalysisOptions
-): Promise<AnalysisResult> {
-  // Implementation
-}
-```
-
-### 2. Tool Documentation
-
-```typescript
-/**
- * @tool new_tool
- * @description Performs new operation on database
- * @input {
- *   param1: string,
- *   param2?: number,
- *   options?: object
- * }
- * @output {
- *   status: "success" | "error",
- *   data: object,
- *   error?: {
- *     code: string,
- *     message: string
- *   }
- * }
- */
-```
-
-## Release Process
-
-1. **Version Update**
-   ```bash
-   npm version patch|minor|major
-   ```
-
-2. **Build and Test**
-   ```bash
-   npm run build
-   npm test
-   ```
-
-3. **Documentation Update**
-   - Update CHANGELOG.md
-   - Update API documentation
-   - Review README.md
-
-4. **Create Release**
-   ```bash
-   git tag v1.0.0
-   git push origin v1.0.0
-   ```
-
-## Best Practices
-
-1. **Code Style**
-   - Follow TypeScript best practices
-   - Use ESLint rules
-   - Maintain consistent formatting
-   - Write clear comments
-
-2. **Testing**
-   - Write unit tests for new features
-   - Include integration tests
-   - Maintain test coverage
-   - Use meaningful test names
-
-3. **Error Handling**
-   - Use custom error types
-   - Provide meaningful error messages
-   - Include error context
-   - Log errors appropriately
-
-4. **Documentation**
-   - Document new features
-   - Update API documentation
-   - Include examples
-   - Keep README current
+`prepublishOnly` verifies tests, production dependency audit status, build outputs, built-CLI startup behavior, tool connection lifecycle cleanup, Docker runtime hardening, MCP stdio smoke behavior, docs/runtime parity, security posture documentation, package contents, and installed package/bin behavior from a generated tarball. Confirm the manual dry-run package output remains consistent with that automated package verifier.
+It also runs `verify:workflows`, which checks that GitHub Actions retain least-privilege CI permissions and the PostgreSQL integration service before release publishing.

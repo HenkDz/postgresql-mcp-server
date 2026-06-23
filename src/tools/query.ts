@@ -1,7 +1,8 @@
-import { DatabaseConnection } from '../utils/connection.js';
+import { DatabaseConnection, sanitizeErrorMessage } from '../utils/connection.js';
 import { z } from 'zod';
 import type { PostgresTool, GetConnectionStringFn, ToolOutput } from '../types/tool.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+import { getReadOnlySqlValidationError, redactSqlText } from '../utils/sql.js';
 
 interface ExplainResult {
   query: string;
@@ -27,6 +28,7 @@ interface SlowQuery {
   shared_blks_written: number;
   temp_blks_read: number;
   temp_blks_written: number;
+  cache_hit_ratio: number;
 }
 
 interface QueryStats {
@@ -45,6 +47,36 @@ interface QueryStats {
   cache_hit_ratio: number;
 }
 
+const MAX_QUERY_STATS_LIMIT = 100;
+
+function normalizeLimit(limit: number | undefined, defaultValue: number): number {
+  const value = limit ?? defaultValue;
+  if (!Number.isInteger(value) || value < 1 || value > MAX_QUERY_STATS_LIMIT) {
+    throw new McpError(ErrorCode.InvalidParams, `limit must be an integer between 1 and ${MAX_QUERY_STATS_LIMIT}`);
+  }
+
+  return value;
+}
+
+function assertExplainQuerySafe(query: string): void {
+  const validationError = getReadOnlySqlValidationError(query);
+  if (validationError) {
+    throw new McpError(ErrorCode.InvalidParams, `EXPLAIN ${validationError}`);
+  }
+}
+
+function parseQueryId(queryId: string): number {
+  if (!/^-?\d+$/.test(queryId.trim())) {
+    throw new McpError(ErrorCode.InvalidParams, 'queryId must be a pg_stat_statements numeric query ID');
+  }
+
+  return Number(queryId);
+}
+
+function formatValidationError(error: z.ZodError): string {
+  return error.errors.map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`).join(', ');
+}
+
 const ManageQueryInputSchema = z.object({
   operation: z.enum(['explain', 'get_slow_queries', 'get_stats', 'reset_stats']).describe(
     'Operation: explain (EXPLAIN/EXPLAIN ANALYZE query), get_slow_queries (find slow queries from pg_stat_statements), get_stats (query statistics with cache hit ratios), reset_stats (reset pg_stat_statements)'
@@ -60,18 +92,18 @@ const ManageQueryInputSchema = z.object({
   format: z.enum(['text', 'json', 'xml', 'yaml']).optional().default('json').describe('Output format (for explain operation)'),
   
   // GET_SLOW_QUERIES operation parameters
-  limit: z.number().optional().default(10).describe('Number of slow queries to return (for get_slow_queries operation)'),
-  minDuration: z.number().optional().describe('Minimum average duration in milliseconds (for get_slow_queries operation)'),
+  limit: z.number().int().min(1).max(MAX_QUERY_STATS_LIMIT).optional().default(10).describe('Number of slow queries to return (for get_slow_queries operation)'),
+  minDuration: z.number().min(0).optional().describe('Minimum average duration in milliseconds (for get_slow_queries operation)'),
   orderBy: z.enum(['mean_time', 'total_time', 'calls', 'cache_hit_ratio']).optional().default('mean_time').describe('Sort order (for get_slow_queries and get_stats operations)'),
   includeNormalized: z.boolean().optional().default(true).describe('Include normalized query text (for get_slow_queries operation)'),
   
   // GET_STATS operation parameters
-  minCalls: z.number().optional().describe('Minimum number of calls (for get_stats operation)'),
+  minCalls: z.number().int().min(1).optional().describe('Minimum number of calls (for get_stats operation)'),
   queryPattern: z.string().optional().describe('Filter queries containing this pattern (for get_stats operation)'),
   
   // RESET_STATS operation parameters
   queryId: z.string().optional().describe('Specific query ID to reset (for reset_stats operation, resets all if not provided)'),
-});
+}).strict();
 
 type ManageQueryInput = z.infer<typeof ManageQueryInputSchema>;
 
@@ -82,6 +114,7 @@ async function executeExplainQuery(
   if (!input.query) {
     throw new McpError(ErrorCode.InvalidParams, 'query parameter is required for explain operation');
   }
+  assertExplainQuerySafe(input.query);
 
   const resolvedConnectionString = getConnectionString(input.connectionString);
   const db = DatabaseConnection.getInstance();
@@ -99,8 +132,11 @@ async function executeExplainQuery(
     options.push(`FORMAT ${format?.toUpperCase()}`);
     
     const explainQuery = `EXPLAIN (${options.join(', ')}) ${query}`;
-    
-    const result = await db.query(explainQuery);
+
+    const result = await db.transaction(async (client) => {
+      const queryResult = await client.query(explainQuery);
+      return queryResult.rows;
+    }, { readOnly: true });
     
     // Extract timing information if available (from EXPLAIN ANALYZE)
     let execution_time: number | undefined;
@@ -125,7 +161,7 @@ async function executeExplainQuery(
     }
     
     return {
-      query,
+      query: redactSqlText(query),
       plan: result,
       execution_time,
       planning_time,
@@ -135,7 +171,10 @@ async function executeExplainQuery(
     };
     
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to explain query: ${error instanceof Error ? error.message : String(error)}`);
+    if (error instanceof McpError) {
+      throw error;
+    }
+    throw new McpError(ErrorCode.InternalError, `Failed to explain query: ${sanitizeErrorMessage(error)}`);
   } finally {
     await db.disconnect();
   }
@@ -162,11 +201,18 @@ async function executeGetSlowQueries(
     }
     
     const queryColumn = includeNormalized ? 'query' : 'query';
-    const minDurationClause = minDuration ? `WHERE mean_time >= ${minDuration}` : '';
-    const orderByColumn = orderBy === 'cache_hit_ratio' ? 'mean_time' : orderBy || 'mean_time'; // fallback for unsupported column
-    
+    const slowQueryLimit = normalizeLimit(limit, 10);
+    const whereConditions: string[] = [];
+    const params: number[] = [slowQueryLimit];
+    if (minDuration !== undefined) {
+      whereConditions.push('mean_time >= $2');
+      params.push(minDuration);
+    }
+    const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+    const orderByColumn = orderBy || 'mean_time';
+
     const slowQueriesQuery = `
-      SELECT 
+      SELECT
         ${queryColumn},
         calls,
         total_time,
@@ -179,18 +225,28 @@ async function executeGetSlowQueries(
         shared_blks_read,
         shared_blks_written,
         temp_blks_read,
-        temp_blks_written
-      FROM pg_stat_statements 
-      ${minDurationClause}
-      ORDER BY ${orderByColumn} DESC 
+        temp_blks_written,
+        CASE
+          WHEN (shared_blks_hit + shared_blks_read) = 0 THEN 0
+          ELSE round((shared_blks_hit::numeric / (shared_blks_hit + shared_blks_read)::numeric) * 100, 2)
+        END as cache_hit_ratio
+      FROM pg_stat_statements
+      ${whereClause}
+      ORDER BY ${orderByColumn} DESC
       LIMIT $1
     `;
-    
-    const result = await db.query<SlowQuery>(slowQueriesQuery, [limit]);
-    return result;
+
+    const result = await db.query<SlowQuery>(slowQueriesQuery, params);
+    return result.map((row) => ({
+      ...row,
+      query: redactSqlText(row.query)
+    }));
     
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to get slow queries: ${error instanceof Error ? error.message : String(error)}`);
+    if (error instanceof McpError) {
+      throw error;
+    }
+    throw new McpError(ErrorCode.InternalError, `Failed to get slow queries: ${sanitizeErrorMessage(error)}`);
   } finally {
     await db.disconnect();
   }
@@ -203,7 +259,7 @@ async function executeGetQueryStats(
   const resolvedConnectionString = getConnectionString(input.connectionString);
   const db = DatabaseConnection.getInstance();
   const { limit, orderBy, minCalls, queryPattern } = input;
-  const statsLimit = limit || 20; // Default for stats operation
+  const statsLimit = normalizeLimit(limit, 20);
   
   try {
     await db.connect(resolvedConnectionString);
@@ -261,10 +317,16 @@ async function executeGetQueryStats(
     `;
     
     const result = await db.query<QueryStats>(queryStatsQuery, params);
-    return result;
+    return result.map((row) => ({
+      ...row,
+      query: redactSqlText(row.query)
+    }));
     
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to get query statistics: ${error instanceof Error ? error.message : String(error)}`);
+    if (error instanceof McpError) {
+      throw error;
+    }
+    throw new McpError(ErrorCode.InternalError, `Failed to get query statistics: ${sanitizeErrorMessage(error)}`);
   } finally {
     await db.disconnect();
   }
@@ -274,23 +336,27 @@ async function executeResetQueryStats(
   input: ManageQueryInput,
   getConnectionString: GetConnectionStringFn
 ): Promise<{ message: string; queryId?: string }> {
+  const { queryId } = input;
+  const parsedQueryId = queryId ? parseQueryId(queryId) : undefined;
   const resolvedConnectionString = getConnectionString(input.connectionString);
   const db = DatabaseConnection.getInstance();
-  const { queryId } = input;
-  
+
   try {
     await db.connect(resolvedConnectionString);
-    
-    if (queryId) {
-      await db.query('SELECT pg_stat_statements_reset($1)', [Number(queryId)]);
+
+    if (parsedQueryId !== undefined) {
+      await db.query('SELECT pg_stat_statements_reset($1)', [parsedQueryId]);
       return { message: `Query statistics reset for query ID: ${queryId}`, queryId };
-    } 
-    
+    }
+
     await db.query('SELECT pg_stat_statements_reset()');
     return { message: 'All query statistics have been reset' };
     
   } catch (error) {
-    throw new McpError(ErrorCode.InternalError, `Failed to reset query statistics: ${error instanceof Error ? error.message : String(error)}`);
+    if (error instanceof McpError) {
+      throw error;
+    }
+    throw new McpError(ErrorCode.InternalError, `Failed to reset query statistics: ${sanitizeErrorMessage(error)}`);
   } finally {
     await db.disconnect();
   }
@@ -325,9 +391,9 @@ export const manageQueryTool: PostgresTool = {
   async execute(params: unknown, getConnectionString: GetConnectionStringFn): Promise<ToolOutput> {
     const validationResult = ManageQueryInputSchema.safeParse(params);
     if (!validationResult.success) {
-      return { 
-        content: [{ type: 'text', text: `Invalid input: ${validationResult.error.format()}` }], 
-        isError: true 
+      return {
+        content: [{ type: 'text', text: `Invalid input: ${formatValidationError(validationResult.error)}` }],
+        isError: true
       };
     }
 
@@ -361,11 +427,11 @@ export const manageQueryTool: PostgresTool = {
         ] 
       };
     } catch (error) {
-      const errorMessage = error instanceof McpError ? error.message : (error instanceof Error ? error.message : String(error));
+      const errorMessage = sanitizeErrorMessage(error);
       return { 
         content: [{ type: 'text', text: `Error in query operation: ${errorMessage}` }], 
         isError: true 
       };
     }
   }
-}; 
+};
