@@ -1,6 +1,6 @@
 {
   "name": "@henkey/postgres-mcp-server",
-  "version": "1.0.5",
+  "version": "1.0.7",
   "description": "A Model Context Protocol (MCP) server that provides comprehensive PostgreSQL database management capabilities for AI assistants",
   "main": "build/index.js",
   "types": "build/index.d.ts",
@@ -53,7 +53,7 @@
   },
   "homepage": "https://github.com/HenkDz/postgresql-mcp-server#readme",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "latest",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "commander": "^12.1.0",
     "pg": "^8.16.3",
     "pg-monitor": "^3.0.0",

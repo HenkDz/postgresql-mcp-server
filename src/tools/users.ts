@@ -26,6 +26,28 @@ interface Permission {
   grantor: string;
 }
 
+const SIMPLE_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function quoteIdent(identifier: string): string {
+  if (!SIMPLE_IDENTIFIER_PATTERN.test(identifier)) {
+    throw new Error(`Invalid SQL identifier "${identifier}". Use simple unquoted PostgreSQL identifiers only.`);
+  }
+
+  return `"${identifier}"`;
+}
+
+function quoteQualifiedIdent(identifier: string, schema = 'public'): string {
+  if (!schema || schema === 'public') {
+    return quoteIdent(identifier);
+  }
+
+  return `${quoteIdent(schema)}.${quoteIdent(identifier)}`;
+}
+
+function quoteLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
 // --- Create User Tool ---
 const CreateUserInputSchema = z.object({
   connectionString: z.string().optional(),
@@ -62,11 +84,12 @@ async function executeCreateUser(
   } = input;
 
   try {
+    const quotedUsername = quoteIdent(username);
     await db.connect(resolvedConnectionString);
     
     const options = [];
     
-    if (password) options.push(`PASSWORD '${password.replace(/'/g, "''")}'`);
+    if (password) options.push(`PASSWORD ${quoteLiteral(password)}`);
     if (superuser) options.push('SUPERUSER');
     if (createdb) options.push('CREATEDB');
     if (createrole) options.push('CREATEROLE');
@@ -74,9 +97,9 @@ async function executeCreateUser(
     if (replication) options.push('REPLICATION');
     if (!inherit) options.push('NOINHERIT');
     if (connectionLimit !== undefined) options.push(`CONNECTION LIMIT ${connectionLimit}`);
-    if (validUntil) options.push(`VALID UNTIL '${validUntil}'`);
+    if (validUntil) options.push(`VALID UNTIL ${quoteLiteral(validUntil)}`);
     
-    const createUserSQL = `CREATE USER "${username}"${options.length > 0 ? ` ${options.join(' ')}` : ''}`;
+    const createUserSQL = `CREATE USER ${quotedUsername}${options.length > 0 ? ` ${options.join(' ')}` : ''}`;
     
     await db.query(createUserSQL);
     
@@ -125,15 +148,16 @@ async function executeDropUser(
   const { username, ifExists, cascade } = input;
 
   try {
+    const quotedUsername = quoteIdent(username);
     await db.connect(resolvedConnectionString);
     
     // First, reassign or drop owned objects if cascade is true
     if (cascade) {
-      await db.query(`DROP OWNED BY "${username}" CASCADE`);
+      await db.query(`DROP OWNED BY ${quotedUsername} CASCADE`);
     }
     
     const ifExistsClause = ifExists ? 'IF EXISTS ' : '';
-    const dropUserSQL = `DROP USER ${ifExistsClause}"${username}"`;
+    const dropUserSQL = `DROP USER ${ifExistsClause}${quotedUsername}`;
     
     await db.query(dropUserSQL);
     
@@ -200,12 +224,13 @@ async function executeAlterUser(
   } = input;
 
   try {
+    const quotedUsername = quoteIdent(username);
     await db.connect(resolvedConnectionString);
     
     const changes = [];
     
     if (password !== undefined) {
-      await db.query(`ALTER USER "${username}" PASSWORD '${password.replace(/'/g, "''")}'`);
+      await db.query(`ALTER USER ${quotedUsername} PASSWORD ${quoteLiteral(password)}`);
       changes.push('password');
     }
     
@@ -217,10 +242,10 @@ async function executeAlterUser(
     if (replication !== undefined) attributes.push(replication ? 'REPLICATION' : 'NOREPLICATION');
     if (inherit !== undefined) attributes.push(inherit ? 'INHERIT' : 'NOINHERIT');
     if (connectionLimit !== undefined) attributes.push(`CONNECTION LIMIT ${connectionLimit}`);
-    if (validUntil !== undefined) attributes.push(`VALID UNTIL '${validUntil}'`);
+    if (validUntil !== undefined) attributes.push(`VALID UNTIL ${quoteLiteral(validUntil)}`);
     
     if (attributes.length > 0) {
-      const alterUserSQL = `ALTER USER "${username}" ${attributes.join(' ')}`;
+      const alterUserSQL = `ALTER USER ${quotedUsername} ${attributes.join(' ')}`;
       await db.query(alterUserSQL);
       changes.push(...attributes);
     }
@@ -278,24 +303,21 @@ async function executeGrantPermissions(
     let targetSpec = '';
     switch (targetType) {
       case 'table': {
-        const schemaPrefix = schema !== 'public' ? `"${schema}".` : '';
-        targetSpec = `TABLE ${schemaPrefix}"${target}"`;
+        targetSpec = `TABLE ${quoteQualifiedIdent(target, schema)}`;
         break;
       }
       case 'schema':
-        targetSpec = `SCHEMA "${target}"`;
+        targetSpec = `SCHEMA ${quoteIdent(target)}`;
         break;
       case 'database':
-        targetSpec = `DATABASE "${target}"`;
+        targetSpec = `DATABASE ${quoteIdent(target)}`;
         break;
       case 'sequence': {
-        const schemaPrefix = schema !== 'public' ? `"${schema}".` : '';
-        targetSpec = `SEQUENCE ${schemaPrefix}"${target}"`;
+        targetSpec = `SEQUENCE ${quoteQualifiedIdent(target, schema)}`;
         break;
       }
       case 'function': {
-        const schemaPrefix = schema !== 'public' ? `"${schema}".` : '';
-        targetSpec = `FUNCTION ${schemaPrefix}"${target}"`;
+        targetSpec = `FUNCTION ${quoteQualifiedIdent(target, schema)}`;
         break;
       }
     }
@@ -303,7 +325,7 @@ async function executeGrantPermissions(
     const permissionsStr = permissions.join(', ');
     const withGrantClause = withGrantOption ? ' WITH GRANT OPTION' : '';
     
-    const grantSQL = `GRANT ${permissionsStr} ON ${targetSpec} TO "${username}"${withGrantClause}`;
+    const grantSQL = `GRANT ${permissionsStr} ON ${targetSpec} TO ${quoteIdent(username)}${withGrantClause}`;
     
     await db.query(grantSQL);
     
@@ -360,24 +382,21 @@ async function executeRevokePermissions(
     let targetSpec = '';
     switch (targetType) {
       case 'table': {
-        const schemaPrefix = schema !== 'public' ? `"${schema}".` : '';
-        targetSpec = `TABLE ${schemaPrefix}"${target}"`;
+        targetSpec = `TABLE ${quoteQualifiedIdent(target, schema)}`;
         break;
       }
       case 'schema':
-        targetSpec = `SCHEMA "${target}"`;
+        targetSpec = `SCHEMA ${quoteIdent(target)}`;
         break;
       case 'database':
-        targetSpec = `DATABASE "${target}"`;
+        targetSpec = `DATABASE ${quoteIdent(target)}`;
         break;
       case 'sequence': {
-        const schemaPrefix = schema !== 'public' ? `"${schema}".` : '';
-        targetSpec = `SEQUENCE ${schemaPrefix}"${target}"`;
+        targetSpec = `SEQUENCE ${quoteQualifiedIdent(target, schema)}`;
         break;
       }
       case 'function': {
-        const schemaPrefix = schema !== 'public' ? `"${schema}".` : '';
-        targetSpec = `FUNCTION ${schemaPrefix}"${target}"`;
+        targetSpec = `FUNCTION ${quoteQualifiedIdent(target, schema)}`;
         break;
       }
     }
@@ -385,7 +404,7 @@ async function executeRevokePermissions(
     const permissionsStr = permissions.join(', ');
     const cascadeClause = cascade ? ' CASCADE' : '';
     
-    const revokeSQL = `REVOKE ${permissionsStr} ON ${targetSpec} FROM "${username}"${cascadeClause}`;
+    const revokeSQL = `REVOKE ${permissionsStr} ON ${targetSpec} FROM ${quoteIdent(username)}${cascadeClause}`;
     
     await db.query(revokeSQL);
     
