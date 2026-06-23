@@ -32,6 +32,19 @@ describe('connection target allowlist helpers', () => {
     )).not.toThrow();
   });
 
+  it('rejects URL host override parameters before allowlist matching', () => {
+    const allowedTargets = normalizeAllowedConnectionTargets(['allowed.internal']);
+
+    expect(() => assertConnectionTargetAllowed(
+      'postgresql://allowed.internal/app?host=evil.internal',
+      allowedTargets
+    )).toThrow('host or hostaddr query parameters');
+    expect(() => assertConnectionTargetAllowed(
+      'postgresql://allowed.internal/app?hostaddr=10.0.0.1',
+      allowedTargets
+    )).toThrow('host or hostaddr query parameters');
+  });
+
   it('parses keyword-style connection targets', () => {
     expect(parseConnectionTarget("host=db.internal port=5432 dbname=app user='read only' password=secret")).toEqual({
       host: 'db.internal',

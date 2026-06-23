@@ -211,6 +211,9 @@ export function parseConnectionTarget(connectionString: string): ConnectionTarge
       if (!parsed.hostname) {
         throw new Error('Connection target allowlist requires URL connection strings to include an explicit host.');
       }
+      if (parsed.searchParams.has('host') || parsed.searchParams.has('hostaddr')) {
+        throw new Error('Connection target allowlist does not support URL host or hostaddr query parameters.');
+      }
 
       return {
         host: normalizeConnectionHost(parsed.hostname),
@@ -220,7 +223,7 @@ export function parseConnectionTarget(connectionString: string): ConnectionTarge
       };
     }
   } catch (error) {
-    if (error instanceof Error && error.message.includes('allowlist requires')) {
+    if (error instanceof Error && error.message.includes('allowlist')) {
       throw error;
     }
   }

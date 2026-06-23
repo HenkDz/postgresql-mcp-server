@@ -411,7 +411,7 @@ async function getTableInfo(db: DatabaseConnection, tableName: string, schema: s
 
 // Enum functions (adapted from enums.ts)
 async function executeGetEnumsInSchema(
-  connectionString: string,
+  connectionString: string | undefined,
   schema = 'public',
   enumName?: string,
   getConnectionString?: GetConnectionStringFn
@@ -450,7 +450,7 @@ async function executeGetEnumsInSchema(
 }
 
 async function executeCreateEnumInSchema(
-  connectionString: string,
+  connectionString: string | undefined,
   enumName: string,
   values: string[],
   schema = 'public',
@@ -564,7 +564,7 @@ export const manageSchemaTools: PostgresTool = {
 
         case 'get_enums': {
           const result = await executeGetEnumsInSchema(
-            connStringArg || '', 
+            connStringArg,
             schema || 'public', 
             enumName, 
             getConnectionStringVal
@@ -580,7 +580,7 @@ export const manageSchemaTools: PostgresTool = {
             };
           }
           const result = await executeCreateEnumInSchema(
-            connStringArg || '', 
+            connStringArg,
             enumName, 
             values, 
             schema || 'public', 

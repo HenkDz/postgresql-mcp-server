@@ -383,6 +383,27 @@ describe('manageSchemaTools', () => {
     expect(output).toContain('"active"');
   });
 
+  it('passes undefined connection strings through enum fallback paths', async () => {
+    const mockDb = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      query: vi.fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]),
+      disconnect: vi.fn().mockResolvedValue(undefined)
+    };
+    vi.spyOn(DatabaseConnection, 'getInstance').mockReturnValue(mockDb as unknown as DatabaseConnection);
+
+    await manageSchemaTools.execute({ operation: 'get_enums' }, mockGetConnectionString);
+    await manageSchemaTools.execute({
+      operation: 'create_enum',
+      enumName: 'status',
+      values: ['active']
+    }, mockGetConnectionString);
+
+    expect(mockGetConnectionString).toHaveBeenNthCalledWith(1, undefined);
+    expect(mockGetConnectionString).toHaveBeenNthCalledWith(2, undefined);
+  });
+
   it('sanitizes schema database errors before returning them', async () => {
     const mockDb = {
       connect: vi.fn().mockResolvedValue(undefined),
