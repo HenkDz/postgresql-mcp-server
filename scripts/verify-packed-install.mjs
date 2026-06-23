@@ -1,6 +1,6 @@
-import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const packageJson = JSON.parse(readFileSync('package.json', 'utf8'));
@@ -29,9 +29,32 @@ function runNode(args, options = {}) {
   });
 }
 
+function runInstalledBin(args, options = {}) {
+  const binName = process.platform === 'win32' ? 'postgres-mcp.cmd' : 'postgres-mcp';
+  const binPath = join(installDir, 'node_modules', '.bin', binName);
+  if (!existsSync(binPath)) {
+    return {
+      status: 1,
+      stdout: '',
+      stderr: `Installed bin not found: ${binPath}`
+    };
+  }
+
+  if (process.platform === 'win32') {
+    return runNpm(['exec', '--', 'postgres-mcp', ...args], options);
+  }
+
+  return spawnSync(binPath, args, {
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024,
+    ...options
+  });
+}
+
 function requireSuccess(name, result) {
   if (result.status !== 0) {
-    errors.push(`${name} failed with exit code ${result.status}. stdout=${result.stdout} stderr=${result.stderr}`);
+    const error = result.error ? ` error=${result.error.message}` : '';
+    errors.push(`${name} failed with exit code ${result.status}.${error} stdout=${result.stdout} stderr=${result.stderr}`);
     return false;
   }
 
@@ -47,11 +70,12 @@ function requireIncludes(name, value, expected) {
 const tempRoot = mkdtempSync(join(tmpdir(), 'postgres-mcp-pack-install-'));
 const packDir = join(tempRoot, 'pack');
 const installDir = join(tempRoot, 'install');
+const npmCacheDir = join(tempRoot, 'npm-cache');
 mkdirSync(packDir);
 mkdirSync(installDir);
 
 try {
-  const packResult = runNpm(['pack', '--json', '--pack-destination', packDir, '--cache', resolve('.npm-cache')]);
+  const packResult = runNpm(['pack', '--json', '--pack-destination', packDir, '--cache', npmCacheDir]);
   if (requireSuccess('npm pack', packResult)) {
     const parsedPackResult = JSON.parse(packResult.stdout);
     const tarballName = parsedPackResult[0]?.filename;
@@ -70,7 +94,7 @@ try {
         '--no-audit',
         '--no-fund',
         '--cache',
-        resolve('.npm-cache'),
+        npmCacheDir,
         tarballPath
       ], { cwd: installDir });
       if (requireSuccess('npm install packed tarball', installResult)) {
@@ -83,12 +107,12 @@ try {
           requireIncludes('installed package import output', importResult.stdout.trim(), `${packageJson.version}:18`);
         }
 
-        const versionResult = runNpm(['exec', '--', 'postgres-mcp', '--version'], { cwd: installDir });
+        const versionResult = runInstalledBin(['--version'], { cwd: installDir });
         if (requireSuccess('installed postgres-mcp --version', versionResult)) {
           requireIncludes('installed postgres-mcp --version output', versionResult.stdout.trim(), packageJson.version);
         }
 
-        const helpResult = runNpm(['exec', '--', 'postgres-mcp', '--help'], { cwd: installDir });
+        const helpResult = runInstalledBin(['--help'], { cwd: installDir });
         if (requireSuccess('installed postgres-mcp --help', helpResult)) {
           requireIncludes('installed postgres-mcp --help output', helpResult.stdout, '--allowed-connection-target');
         }

@@ -914,9 +914,29 @@ export async function main(argv = process.argv): Promise<void> {
   }
 }
 
-const isCliEntrypoint = process.argv[1]
-  ? fileURLToPath(import.meta.url) === path.resolve(process.argv[1])
-  : false;
+type RealpathResolver = (filePath: string) => string;
+
+function resolveEntrypointPath(filePath: string, realpath: RealpathResolver): string {
+  try {
+    return realpath(filePath);
+  } catch {
+    return path.resolve(filePath);
+  }
+}
+
+export function isCliEntrypointPath(
+  modulePath: string,
+  argvPath: string | undefined,
+  realpath: RealpathResolver = fs.realpathSync
+): boolean {
+  if (!argvPath) {
+    return false;
+  }
+
+  return resolveEntrypointPath(modulePath, realpath) === resolveEntrypointPath(path.resolve(argvPath), realpath);
+}
+
+const isCliEntrypoint = isCliEntrypointPath(fileURLToPath(import.meta.url), process.argv[1]);
 
 if (isCliEntrypoint) {
   main().catch(error => {

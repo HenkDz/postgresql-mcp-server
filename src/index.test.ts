@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import {
   DOCUMENTED_CLI_OPTIONS,
@@ -12,6 +12,7 @@ import {
   allTools,
   createCliProgram,
   createRuntimeConfig,
+  isCliEntrypointPath,
   main,
   type RuntimeConfig
 } from './index';
@@ -629,6 +630,14 @@ describe('PostgreSQLServer request boundary', () => {
     expect(PACKAGE_VERSION).toBe(packageLock.version);
     expect(PACKAGE_VERSION).toBe(packageLock.packages?.['']?.version);
     expect(createCliProgram().version()).toBe(PACKAGE_VERSION);
+  });
+
+  it('recognizes npm symlinked bin paths as CLI entrypoints', () => {
+    const modulePath = resolve('node_modules/@henkey/postgres-mcp-server/build/index.js');
+    const binPath = resolve('node_modules/.bin/postgres-mcp');
+    const realpath = (filePath: string) => filePath === binPath ? modulePath : filePath;
+
+    expect(isCliEntrypointPath(modulePath, binPath, realpath)).toBe(true);
   });
 
   it('fails closed on invalid explicit CLI numeric resource settings', () => {
