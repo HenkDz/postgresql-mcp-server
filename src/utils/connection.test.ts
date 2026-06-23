@@ -644,6 +644,47 @@ describe('DatabaseConnection lifecycle', () => {
     }
   });
 
+  it('reuses an active same-pool connection without waiting on its lease', async () => {
+    const release = vi.fn();
+    const client = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      release
+    };
+    const pool = {
+      connect: vi.fn().mockResolvedValue(client),
+      on: vi.fn(),
+      end: vi.fn().mockResolvedValue(undefined)
+    };
+    const Pool = vi.fn(() => pool);
+
+    vi.resetModules();
+    vi.doMock('pg', () => ({ default: { Pool } }));
+    vi.doMock('pg-monitor', () => ({
+      default: {
+        attach: vi.fn(),
+        setTheme: vi.fn()
+      }
+    }));
+
+    try {
+      const { DatabaseConnection: FreshDatabaseConnection } = await import('./connection');
+      const db = FreshDatabaseConnection.getInstance();
+
+      await db.connect('postgresql://same');
+      await db.connect('postgresql://same');
+
+      expect(Pool).toHaveBeenCalledTimes(1);
+      expect(pool.connect).toHaveBeenCalledTimes(1);
+      expect(client.query).toHaveBeenCalledTimes(1);
+
+      await FreshDatabaseConnection.cleanupPools();
+    } finally {
+      vi.doUnmock('pg');
+      vi.doUnmock('pg-monitor');
+      vi.resetModules();
+    }
+  });
+
   it('releases the connection lease when connect validation fails', async () => {
     const release = vi.fn();
     const client = {

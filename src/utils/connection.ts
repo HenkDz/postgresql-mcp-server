@@ -263,25 +263,30 @@ export class DatabaseConnection {
    * Connect to a PostgreSQL database
    */
   public async connect(connectionString?: string, options: ConnectionOptions = {}): Promise<void> {
+    // Use environment variable only when no explicit connection string was provided.
+    const connString = connectionString !== undefined ? connectionString : process.env.POSTGRES_CONNECTION_STRING;
+    const effectiveOptions = {
+      ...getDefaultConnectionOptions(),
+      ...options
+    };
+
+    if (connString === undefined || connString.trim() === '') {
+      throw new Error('No non-empty connection string provided and POSTGRES_CONNECTION_STRING environment variable is not set');
+    }
+
+    assertConnectionOptions(effectiveOptions);
+    const poolCacheKey = buildPoolCacheKey(connString, effectiveOptions);
+
+    // If already connected to this database, reuse the connection without waiting on our own active lease.
+    if (this.pool && this.poolCacheKey === poolCacheKey) {
+      return;
+    }
+
     await this.acquireConnectionLease();
     let connectionStateChanged = false;
 
     try {
-      // Use environment variable only when no explicit connection string was provided.
-      const connString = connectionString !== undefined ? connectionString : process.env.POSTGRES_CONNECTION_STRING;
-      const effectiveOptions = {
-        ...getDefaultConnectionOptions(),
-        ...options
-      };
-
-      if (connString === undefined || connString.trim() === '') {
-        throw new Error('No non-empty connection string provided and POSTGRES_CONNECTION_STRING environment variable is not set');
-      }
-
-      assertConnectionOptions(effectiveOptions);
-      const poolCacheKey = buildPoolCacheKey(connString, effectiveOptions);
-
-      // If already connected to this database, reuse the connection
+      // Another queued connect may have established the requested pool while we waited.
       if (this.pool && this.poolCacheKey === poolCacheKey) {
         return;
       }
