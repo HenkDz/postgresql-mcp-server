@@ -196,7 +196,7 @@ export const DOCUMENTED_TOOLS_CONFIG_KEYS = [
 
 const ALLOWED_TOOLS_CONFIG_KEYS = new Set<string>(DOCUMENTED_TOOLS_CONFIG_KEYS);
 
-export const PACKAGE_VERSION = '1.0.6';
+export const PACKAGE_VERSION = '2.0.0';
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');

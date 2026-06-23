@@ -1,6 +1,6 @@
 {
   "name": "@henkey/postgres-mcp-server",
-  "version": "1.0.6",
+  "version": "2.0.0",
   "description": "A Model Context Protocol (MCP) server that provides comprehensive PostgreSQL database management capabilities for AI assistants",
   "main": "build/index.js",
   "types": "build/index.d.ts",

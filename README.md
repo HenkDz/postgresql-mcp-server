@@ -1,9 +1,27 @@
 # PostgreSQL MCP Server
 [![smithery badge](https://smithery.ai/badge/@HenkDz/postgresql-mcp-server)](https://smithery.ai/server/@HenkDz/postgresql-mcp-server)
 
+<a href="https://glama.ai/mcp/servers/@HenkDz/postgresql-mcp-server">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@HenkDz/postgresql-mcp-server/badge" alt="PostgreSQL Server MCP server" />
+</a>
+
 A Model Context Protocol (MCP) server that provides comprehensive PostgreSQL database management capabilities for AI assistants.
 
 **🚀 What's New**: This server has been completely redesigned from 46 individual tools to 18 intelligent tools through consolidation (34→8 meta-tools) and enhancement (+4 new tools), providing better AI discovery while adding powerful data manipulation and comment management capabilities.
+
+## Breaking Changes in 2.0.0
+
+Version 2.0.0 introduces security boundaries that intentionally change default behavior from the 1.x line:
+
+- The server starts in `readonly` mode. Mutations, DDL, role administration, filesystem import/export, and arbitrary SQL require `--security-mode write`, `--security-mode admin`, or `--security-mode unsafe` as appropriate.
+- Destructive operations such as drops, resets, broad role grants, and arbitrary SQL require `--allow-destructive`.
+- Per-tool `connectionString`, `sourceConnectionString`, and `targetConnectionString` arguments are disabled by default. Use server-level `--connection-string` or `POSTGRES_CONNECTION_STRING`, or explicitly opt in with `--allow-tool-connection-string`.
+- Legacy string `where` clauses are rejected for mutation, index, export, and copy filters. Use structured `where` predicates, or `rawWhere` only with `--security-mode unsafe --allow-destructive`.
+- Multi-statement `pg_execute_sql` calls must use `transactional: true`, `expectRows: false`, and no bind `parameters`.
+- Tool schemas reject unknown fields, so misspelled or unintended inputs fail before connection resolution.
+- User and target identifiers are restricted to safe simple PostgreSQL identifiers.
+
+For the non-breaking security patch line, use `@henkey/postgres-mcp-server@1.0.7`.
 
 ## Quick Start
 
